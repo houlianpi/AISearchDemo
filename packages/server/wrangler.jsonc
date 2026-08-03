@@ -1,0 +1,28 @@
+{
+	"$schema": "../../node_modules/wrangler/config-schema.json",
+	"name": "wa-agent-server",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-06-01",
+	"compatibility_flags": ["nodejs_compat"],
+	"limits": {
+		// The agent loop can burn real CPU on long turns (JSON/diff/token estimation).
+		// Every inbound WebSocket message resets this budget.
+		"cpu_ms": 300000
+	},
+	"durable_objects": {
+		"bindings": [{ "name": "USER_AGENT", "class_name": "UserAgentDO" }]
+	},
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["UserAgentDO"] }],
+	// pi's package-location detection runs `fileURLToPath(import.meta.url)` at
+	// module scope, which the bundler cannot resolve for a Worker. The value is
+	// only used for CLI self-update/doc paths, none of which run here.
+	"define": {
+		"import.meta.url": "\"file:///worker/index.js\""
+	},
+	"vars": {
+		"LLM_BASE_URL": "http://20.64.238.108:36799/v1",
+		"DEFAULT_MODEL": "claude-opus-4.8",
+		"MAX_CONCURRENT_TURNS": "3"
+	},
+	"observability": { "enabled": true }
+}

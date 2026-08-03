@@ -1,0 +1,3 @@
+# Copy to `.dev.vars` (gitignored) for local `wrangler dev`.
+# For deploys: `npx wrangler secret put LLM_API_KEY`
+LLM_API_KEY = "sk-replace-me"

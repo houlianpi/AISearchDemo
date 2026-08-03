@@ -1,0 +1,24 @@
+{
+	"name": "@wa/server",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy",
+		"bundle:check": "wrangler deploy --dry-run --outdir .wrangler/dry-run",
+		"typecheck": "tsc -p tsconfig.json --noEmit",
+		"cf-typegen": "wrangler types"
+	},
+	"dependencies": {
+		"@earendil-works/pi-agent-core": "0.82.1",
+		"@earendil-works/pi-ai": "0.82.1",
+		"@earendil-works/pi-coding-agent": "0.82.1",
+		"@wa/protocol": "*"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "5.20260726.1",
+		"typescript": "5.9.3",
+		"wrangler": "4.114.0"
+	}
+}

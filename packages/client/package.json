@@ -1,0 +1,23 @@
+{
+	"name": "@wa/client",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"bin": {
+		"wa": "./src/index.ts"
+	},
+	"scripts": {
+		"start": "tsx src/index.ts",
+		"typecheck": "tsc -p tsconfig.json --noEmit"
+	},
+	"dependencies": {
+		"@wa/protocol": "*",
+		"ws": "8.18.3"
+	},
+	"devDependencies": {
+		"@types/node": "24.12.4",
+		"@types/ws": "8.18.1",
+		"tsx": "4.20.6",
+		"typescript": "5.9.3"
+	}
+}
