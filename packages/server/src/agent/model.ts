@@ -55,6 +55,10 @@ export async function createModelRuntime(env: Env): Promise<ModelRuntime> {
 			cost: ZERO_COST,
 			contextWindow: entry.contextWindow,
 			maxTokens: entry.maxTokens,
+			// pi sends the system prompt as `role: "developer"` for reasoning models
+			// on unrecognised OpenAI-compatible endpoints. This gateway silently
+			// drops that role, so every system prompt vanished before this was set.
+			compat: { supportsDeveloperRole: false },
 		})),
 	});
 

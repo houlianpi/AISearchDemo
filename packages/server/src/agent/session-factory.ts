@@ -1,5 +1,6 @@
 import type { StoredEntry } from "@wa/protocol";
 import { VIRTUAL_ROOT } from "@wa/protocol";
+import { posix } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	type AgentSession,
@@ -21,8 +22,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { OpRpc } from "../do/op-rpc.ts";
 import type { Env } from "../env.ts";
+import { createHtmlProbeToolDefinition } from "./html-probe.ts";
 import { resolveModel, resolveRestoredModel } from "./model.ts";
 import { createRemoteOperations } from "./remote-ops.ts";
+import { PAGE_EXTRACTION_BRIEF } from "./task-prompt.ts";
 
 /**
  * Workers has no writable persistent filesystem (`/tmp` is per-request and
@@ -32,6 +35,9 @@ import { createRemoteOperations } from "./remote-ops.ts";
 
 /** `grep` is intentionally absent: pi always shells out to ripgrep for it. */
 export const REMOTE_TOOL_NAMES = ["read", "write", "edit", "bash", "ls", "find"] as const;
+
+/** Server-side page analysis; not a pi built-in. */
+const HTML_PROBE_TOOL_NAME = "html_probe";
 
 export interface CreateRemoteSessionOptions {
 	env: Env;
@@ -74,6 +80,9 @@ export async function createRemoteSession(options: CreateRemoteSessionOptions): 
 		noPromptTemplates: true,
 		noThemes: true,
 		noContextFiles: true,
+		// The override seam takes literal text; the `systemPrompt` option would be
+		// `existsSync`-probed as a file path first.
+		systemPromptOverride: () => PAGE_EXTRACTION_BRIEF,
 	});
 	await resourceLoader.reload();
 
@@ -87,6 +96,10 @@ export async function createRemoteSession(options: CreateRemoteSessionOptions): 
 		createBashToolDefinition(cwd, { operations: ops.bash }),
 		createLsToolDefinition(cwd, { operations: ops.ls }),
 		createFindToolDefinition(cwd, { operations: ops.find }),
+		createHtmlProbeToolDefinition({
+			readFile: async (path) => (await ops.read.readFile(path)).toString("utf-8"),
+			resolvePath: (path) => posix.resolve(cwd, path.replace(/\\/g, "/")),
+		}),
 	] as ToolDefinition[];
 
 	const sessionManager = SessionManager.inMemory(cwd, { id: sessionId });
@@ -106,7 +119,7 @@ export async function createRemoteSession(options: CreateRemoteSessionOptions): 
 		resourceLoader,
 		sessionManager,
 		customTools,
-		tools: [...REMOTE_TOOL_NAMES],
+		tools: [...REMOTE_TOOL_NAMES, HTML_PROBE_TOOL_NAME],
 	});
 
 	if (restored) {

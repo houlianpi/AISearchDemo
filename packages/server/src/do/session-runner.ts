@@ -1,6 +1,7 @@
 import type { AgentStreamEvent, SessionUsage } from "@wa/protocol";
 import type { AgentSession, AgentSessionEvent, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { createRemoteSession } from "../agent/session-factory.ts";
+import { PAGE_EXTRACTION_BRIEF } from "../agent/task-prompt.ts";
 import type { Env } from "../env.ts";
 import type { OpRpc } from "./op-rpc.ts";
 import type { Outbox } from "./outbox.ts";
@@ -36,6 +37,7 @@ export class SessionRunner {
 	private readonly outbox: Outbox;
 	private readonly unsubscribe: () => void;
 	private persistedEntries: number;
+	private briefed: boolean;
 	private activeTurn: Promise<void> | undefined;
 	private disposed = false;
 
@@ -47,6 +49,7 @@ export class SessionRunner {
 		store: SessionStore;
 		outbox: Outbox;
 		persistedEntries: number;
+		briefed: boolean;
 	}) {
 		this.sessionId = params.sessionId;
 		this.cwd = params.cwd;
@@ -55,6 +58,7 @@ export class SessionRunner {
 		this.store = params.store;
 		this.outbox = params.outbox;
 		this.persistedEntries = params.persistedEntries;
+		this.briefed = params.briefed;
 		this.unsubscribe = this.session.subscribe((event) => this.onAgentEvent(event));
 	}
 
@@ -88,6 +92,7 @@ export class SessionRunner {
 			// so skip them; a brand-new session must persist them or the next restore
 			// cannot tell which model and thinking level it was using.
 			persistedEntries: history.length > 0 ? sessionManager.getEntries().length : 0,
+			briefed: history.length > 0,
 		});
 	}
 
@@ -113,7 +118,7 @@ export class SessionRunner {
 		this.maybeSetTitle(text);
 
 		const turn = this.session
-			.prompt(text)
+			.prompt(this.brief(text))
 			.catch((error: unknown) => {
 				this.outbox.push(this.sessionId, { k: "error", message: errorMessage(error) });
 			})
@@ -130,6 +135,16 @@ export class SessionRunner {
 		await this.session.abort();
 	}
 
+	/**
+	 * The gateway discards `system` messages, so the operating brief is carried
+	 * in the first user message instead. Once it is in the transcript it stays
+	 * there, and later turns of the session send the user's text unchanged.
+	 */
+	private brief(text: string): string {
+		if (this.briefed) return text;
+		this.briefed = true;
+		return `<agent_brief>\n${PAGE_EXTRACTION_BRIEF}\n</agent_brief>\n\nNow handle this request:\n\n${text}`;
+	}
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
