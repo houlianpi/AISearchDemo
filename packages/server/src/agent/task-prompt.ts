@@ -26,7 +26,9 @@ until both have been written.
 Tools: \`html_probe\` to analyse the captured page, \`write\`/\`edit\` to produce the files,
 \`read\`/\`ls\`/\`find\` to navigate, and \`bash\` to verify your work. The client shell is
 PowerShell on Windows and bash elsewhere, so keep shell commands trivial and portable:
-POSIX tools may be missing and PowerShell 5.1 has no \`&&\`, so chain with \`;\`. \`bash\` is
+POSIX tools may be missing and PowerShell 5.1 has no \`&&\`, so chain with \`;\`. Paths inside
+a shell command are NOT translated, so pass them relative to the working directory
+(\`out/extract.js\`), never as \`${VIRTUAL_ROOT}/...\`. Never scan a whole drive. \`bash\` is
 never how you inspect the page or gather data.
 
 ## Non-negotiables
@@ -147,51 +149,136 @@ those exact pixel dimensions (1 CSS px = 1 macOS point), and say which you chose
 | medium | 364x170 | a title plus 3-5 short rows, or a handful of key/value stats      |
 | large  | 364x382 | a list of 6-12 rows — the usual answer for an extracted list      |
 
-### Look like a real widget, not a web page
-
-The default failure is a white card with a small grey heading and a left-aligned list —
-that reads as a web page. A macOS widget is dense, confident and edge-to-edge.
+### Mechanics
 
 - \`html, body { margin: 0; padding: 0; background: transparent; }\` and the widget root is
   the first element, exactly the chosen size, so a screenshot of either the element or the
   viewport is correct. \`overflow: hidden\` on the root: content must never spill or scroll.
 - 24px corner radius, 16-18px inner padding, **no border and no \`box-shadow\`** — the fixed
   box would clip the shadow anyway, and macOS draws its own.
-- Give the card a real material, not plain white. Derive an accent colour from the source
-  brand (Baidu blue \`#2932e1\`, GitHub \`#1f6feb\`, etc.) and use it for a soft tinted
-  gradient, the header glyph and the top-ranked values. A saturated brand gradient or a
-  dark material both look native; flat \`#fff\` does not.
-- Apple's semantic colours, both appearances via \`@media (prefers-color-scheme: dark)\`:
-  - light: surface \`#ffffff\`, label \`#1c1c1e\`, secondary \`rgba(60,60,67,0.6)\`
-  - dark: surface \`#1c1c1e\`, label \`#ffffff\`, secondary \`rgba(235,235,245,0.6)\`
-- Header line: a small accent-tinted rounded square (about 18x18, 6px radius) holding one
-  glyph or the source's first character, then the source name at 13px/600 in the accent
-  colour. Optionally a right-aligned secondary count. One line only.
-- Typography is bigger and tighter than web defaults: system stack
-  \`-apple-system, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif\`, rows 14-15px,
-  weight 500-600, \`letter-spacing: -0.01em\`, \`line-height: 1.2\`. Ranks and numbers use
-  \`font-variant-numeric: tabular-nums\` in a fixed-width column.
-- Separators: none, or hairlines at \`rgba(0,0,0,0.06)\` / \`rgba(255,255,255,0.08)\`. Never a
-  table, grid, header row, zebra striping or a card inside the card.
+- System stack \`-apple-system, "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif\`,
+  \`letter-spacing: -0.02em\` on display type, \`font-variant-numeric: tabular-nums\` on numbers.
+- One fixed appearance. The output is a screenshot, so do not write a
+  \`prefers-color-scheme\` variant: pick the palette that suits the content and commit to it.
 
-### Fill the card — do the arithmetic
+### Pick one composition
 
-Empty space at the bottom is the single most obvious tell that this is not a real widget.
-Before writing the CSS, budget the height explicitly:
+The target is a designed widget, closer to Widgetsmith or Fantastical than to a system
+list. A flat run of equal rows is the failure mode. Choose by size:
 
+- **small — Big number.** One value at 44-56px/700 filling most of the card, a 11px/600
+  uppercase label with \`letter-spacing: 0.06em\` above it, one supporting line below.
+- **medium — Stat row or Hero.** Either 2-3 key/value pairs with values at 24-28px/700, or
+  one featured record at 19-22px/700 over two lines with a compact meta line.
+- **large — Hero plus rest.** The first record is a display block: 20-24px/700, up to two
+  lines, full contrast. The remaining records are a compact list at 13-14px/500 in the
+  secondary colour with the rank in a fixed-width tabular column. The hero should own
+  roughly the top third of the card.
+
+Hierarchy comes from size, weight and colour. Never render N identical rows.
+
+### Build the ground in layers
+
+A single two-stop \`linear-gradient\` still reads as flat colour. Every widget ground is a
+**stack** of layers on the root. Raster images are not available (the file must render
+offline with no network), so the depth comes from CSS.
+
+The governing rule: **the base is a neutral and the accent only tints it.** A card filled
+edge to edge with one saturated hue is a poster, not a widget. It looked wrong when it was
+all blue and it looked wrong when it was all red. The card should read as a dark or light
+material that happens to carry a colour cast.
+
+Derive an accent from the source brand (Baidu \`#2932e1\`, GitHub \`#1f6feb\`, Hacker News
+\`#ff6600\`), then two companion hues by rotating that hue by roughly -30deg and +30deg.
+Three related hues is what makes it a mesh instead of a ramp.
+
+Layer 0, the base. A near-neutral linear gradient, not the brand colour:
+
+- dark: \`#15161a\` to \`#0e0f12\`, optionally nudged a few points toward the accent hue
+- light: \`#fbfbfd\` to \`#f1f2f6\`
+
+Layer 1, the mesh. Three overlapping radial gradients in the accent and its two companions,
+written as \`rgba\`/\`hsla\` with **low alpha** so they wash over the base instead of replacing
+it. Over a dark base use alpha 0.20-0.35; over a light base use 0.08-0.15.
+
+\`\`\`css
+background-image:
+  radial-gradient(115% 80% at 8% -10%,  rgba(<hueA>, 0.30) 0%, transparent 55%),
+  radial-gradient(95% 70% at 105% 15%,  rgba(<hueB>, 0.24) 0%, transparent 50%),
+  radial-gradient(80% 60% at 40% 115%,  rgba(<hueC>, 0.20) 0%, transparent 55%),
+  linear-gradient(160deg, <base1> 0%, <base2> 100%);
 \`\`\`
-usable = height - 2*padding - headerHeight - headerMargin
-rowHeight = usable / rowCount
+
+Layer 2, grain. An inline SVG turbulence data URI on a pseudo-element, no network:
+
+\`\`\`css
+.widget::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  opacity: 0.05; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
 \`\`\`
 
-For large with 10 rows that is roughly \`(382 - 36 - 22 - 12) / 10 ≈ 31px\` per row. Make the
-list \`flex: 1\` and either set that row height or use \`justify-content: space-between\`, so
-the last row's baseline lands on the bottom padding. Never pick a small fixed gap and let
-the remainder pile up at the bottom.
+Layer 3, edge light. \`box-shadow: inset 0 1px 0 rgba(255,255,255,0.14)\` on a dark ground
+gives the top bevel real macOS materials have. On a light ground use
+\`inset 0 0 0 1px rgba(0,0,0,0.04)\` instead.
 
-If the data has fewer rows than the size comfortably holds, scale the type and spacing up
-to fill it, or drop to the next size down. If it has more, show what fits and end with one
-muted \`+N more\` line.
+Pick one by what the content is, and commit to it:
+
+1. **Dark material** — dark base, mesh at 0.20-0.35, text \`#ffffff\` /
+   \`rgba(235,235,245,0.6)\`. For dense ranked lists, trending and news, markets, anything
+   that should feel live.
+2. **Light material** — light base, mesh at 0.08-0.15, text \`#1c1c1e\` /
+   \`rgba(60,60,67,0.6)\`. For calm, text-heavy, reference-style content.
+
+The accent shows up at full strength in exactly three places: the header glyph tile, the
+hero value or its kicker, and the rank of the top item. Nowhere else.
+
+A flat fill, a single two-stop gradient, or a fully saturated surface is not an option.
+
+### One graphic anchor
+
+On top of the ground, exactly one graphic element and no more: an oversized translucent
+numeral or glyph bleeding off a corner at 0.06-0.12 opacity, or one diagonal accent band.
+It must not cost text contrast.
+
+The header is one line: an accent-tinted 20x20 rounded square (6px radius) holding one
+glyph or the source's first character, then the source name at 13px/600. Nothing else.
+
+### Fill the card — structurally, not by arithmetic
+
+You cannot see your output, so never compute a row height and hope it lands. Guarantee the
+fill in CSS:
+
+- The widget root is \`display: flex; flex-direction: column\`, and its direct children are
+  exactly: the graphic anchor (absolutely positioned, so it is out of flow), the header, the
+  hero block, and the rest-list. **Do not wrap the hero and the list in a container div.** A
+  \`display: block\` wrapper anywhere between the root and the list silently kills \`flex: 1\`
+  and leaves a dead band at the bottom. This is the most common way this step fails.
+- The rest-list gets \`flex: 1\` **plus** \`display: grid; grid-auto-rows: 1fr\` (or
+  \`justify-content: space-between\`). Rows then stretch to the bottom padding whatever their
+  count, and nothing can pile up at the bottom.
+- Render every row the data has. Only drop rows when a \`1fr\` track would fall below about
+  22px, and then make one muted \`+N more\` line the last track.
+- If the data is short, raise the type scale instead of leaving the block short.
+- The rendering JS must build this exact structure. Write the DOM builder and the CSS
+  together so the selectors and the flex chain agree.
+
+### Banned
+
+These are the patterns that make generated UI look generated:
+
+- **A long list with a hairline under every row.** The single laziest layout. Use the
+  hero-plus-rest hierarchy, or group rows into 2-3 chunks with one sparse divider each.
+- Decorative status dots before rows or labels.
+- Filler metadata: row counts, timestamps, "updated 4s ago", version stamps.
+- Chained middle dots (\`a · b · c · d\`). One per line at most.
+- Pure black \`#000000\`, neon glows, gradient text.
+- A saturated brand colour as the surface. The base is neutral; the accent is a low-alpha
+  wash plus three small full-strength details.
+- Tables, grids, header rows, zebra striping, a card inside the card.
+- Em-dash (\`—\`) and en-dash (\`–\`) anywhere visible. Use a hyphen.
+- More than one corner-radius scale, or more than one accent colour.
 
 ### Content rules
 
@@ -203,13 +290,31 @@ muted \`+N more\` line.
 - Security: never pass loaded data through \`innerHTML\`. Build every node with
   \`document.createElement\` and \`textContent\`.
 
-## 6. Finish
+## 6. Pre-flight check
 
-Run \`node --check out/extract.js\` to confirm the generated script parses.
+Run every box before you say you are done. A failed box means rewrite, not explain.
 
-Only after \`write\` has succeeded for both files, reply with: the region you chose and why,
-the runner-up you rejected, the fields shown in the widget, the widget size you picked and
-why, and the three steps the user performs — paste \`extract.js\` into the console, save the
+- [ ] Root element is exactly the chosen size in px, \`overflow: hidden\`, transparent body.
+- [ ] One composition archetype from section 5, not N identical rows.
+- [ ] Ground is a layered mesh plus grain plus edge light, not a flat fill or a single
+      two-stop gradient.
+- [ ] The base gradient is a near-neutral and every mesh blob is \`rgba\` within the stated
+      alpha range. The card does not read as one saturated colour.
+- [ ] Exactly one graphic anchor.
+- [ ] One corner-radius scale, one accent colour.
+- [ ] The rest-list carries \`flex: 1\` and distributes its rows (\`grid-auto-rows: 1fr\` or
+      \`space-between\`), and it is a **direct child** of the flex-column root — no \`block\`
+      wrapper in between, or the bottom will be short.
+- [ ] Every row in \`rows\` is rendered, unless a track would be under ~22px.
+- [ ] Secondary text still readable against the ground (aim for 4.5:1 on primary text).
+- [ ] No hairline under every row, no status dots, no row count, no timestamp.
+- [ ] Zero em-dashes and en-dashes in any visible string.
+- [ ] No data baked into \`widget.html\`; it still fetches \`./data.json\`.
+- [ ] \`node --check out/extract.js\` passes.
+
+Only after both files are written, reply with: the region you chose and why, the runner-up
+you rejected, the fields shown in the widget, the size and composition you picked and why,
+and the three steps the user performs — paste \`extract.js\` into the console, save the
 printed JSON as \`out/data.json\`, serve \`out/\` over HTTP and screenshot \`widget.html\`.
 
 ## Never
