@@ -26,6 +26,7 @@ const MODEL_CATALOG: CatalogEntry[] = [
 	{ id: "claude-opus-4.7", name: "Claude Opus 4.7", reasoning: true, contextWindow: 200_000, maxTokens: 32_000 },
 	{ id: "claude-opus-4.5", name: "Claude Opus 4.5", reasoning: true, contextWindow: 128_000, maxTokens: 16_000 },
 	{ id: "claude-sonnet-4.5", name: "Claude Sonnet 4.5", reasoning: true, contextWindow: 128_000, maxTokens: 16_000 },
+	{ id: "gpt-5.6-sol", name: "GPT-5.6 SOL", reasoning: true, contextWindow: 200_000, maxTokens: 32_000 },
 	{ id: "gpt-5.5", name: "GPT-5.5", reasoning: true, contextWindow: 200_000, maxTokens: 32_000 },
 ];
 

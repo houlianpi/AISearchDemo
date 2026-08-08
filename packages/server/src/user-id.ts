@@ -17,6 +17,10 @@ const USER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/;
 
 export function resolveUserId(request: Request): string | null {
 	const raw = request.headers.get(USER_ID_HEADER)?.trim();
-	if (!raw || !USER_ID_PATTERN.test(raw)) return null;
-	return raw;
+	if (raw && USER_ID_PATTERN.test(raw)) return raw;
+	// Browsers cannot set custom headers on a WebSocket handshake, so also accept
+	// the id via a `uid` query parameter (prototype mode: trusted verbatim).
+	const fromQuery = new URL(request.url).searchParams.get("uid")?.trim();
+	if (fromQuery && USER_ID_PATTERN.test(fromQuery)) return fromQuery;
+	return null;
 }

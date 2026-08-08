@@ -2,6 +2,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import {
 	type ClientMessage,
+	type HistoryMessage,
 	PROTOCOL_VERSION,
 	type RemoteOpName,
 	type ServerMessage,
@@ -76,8 +77,10 @@ async function handle(message: ServerMessage): Promise<void> {
 		}
 
 		case "history":
-			if (message.entries.length > 0) {
-				process.stdout.write(`[restored ${message.entries.length} entries]\n`);
+			if (message.messages.length > 0) {
+				process.stdout.write(`\n--- history (${message.messages.length} messages) ---\n`);
+				for (const entry of message.messages) renderHistory(entry);
+				process.stdout.write("--- end of history ---\n");
 			}
 			return;
 
@@ -220,6 +223,24 @@ function render(event: import("@wa/protocol").AgentStreamEvent): void {
 function summarise(args: unknown): string {
 	const text = typeof args === "string" ? args : JSON.stringify(args);
 	return text.length > 120 ? `${text.slice(0, 120)}…` : text;
+}
+
+function renderHistory(message: HistoryMessage): void {
+	switch (message.k) {
+		case "user":
+			process.stdout.write(`\n> ${message.text}\n`);
+			return;
+		case "assistant":
+			process.stdout.write(`${message.text}\n`);
+			return;
+		case "tool_call":
+			process.stdout.write(`  · ${message.name} ${summarise(message.args)}\n`);
+			return;
+		case "tool_result":
+			process.stdout.write(`  ${message.isError ? "✗" : "✓"} ${message.name}`);
+			process.stdout.write(message.isError ? `: ${message.output.split("\n")[0]}\n` : "\n");
+			return;
+	}
 }
 
 function request(message: ClientMessage & { id: string }): Promise<unknown> {

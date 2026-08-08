@@ -115,14 +115,27 @@ export interface SessionSummary {
 	running: boolean;
 }
 
-/** A persisted pi session entry, replayed verbatim on resume. */
+/** A persisted pi session entry, replayed verbatim on resume. Server-side only. */
 export interface StoredEntry {
 	seq: number;
 	entryId: string;
 	type: string;
-	/** Raw pi `SessionEntry` JSON. The client only needs it for transcript rendering. */
+	/** Raw pi `SessionEntry` JSON. */
 	entry: unknown;
 }
+
+/**
+ * One renderable line of a session transcript.
+ *
+ * This is a projection of the stored pi entries, not the entries themselves:
+ * the operating brief that is carried inside the first user message is stripped
+ * out, so a resuming client never sees the server's system prompt.
+ */
+export type HistoryMessage =
+	| { k: "user"; text: string }
+	| { k: "assistant"; text: string }
+	| { k: "tool_call"; toolCallId: string; name: string; args: unknown }
+	| { k: "tool_result"; toolCallId: string; name: string; isError: boolean; output: string };
 
 // ---------------------------------------------------------------------------
 // Client -> Server
@@ -150,7 +163,7 @@ export type ServerMessage =
 	| { t: "ready"; protocolVersion: number; userId: string; sessions: SessionSummary[]; maxConcurrentTurns: number }
 	| { t: "ack"; id: string; ok: true; data?: unknown }
 	| { t: "ack"; id: string; ok: false; error: string }
-	| { t: "history"; sessionId: string; entries: StoredEntry[]; lastSeq: number }
+	| { t: "history"; sessionId: string; messages: HistoryMessage[]; lastSeq: number }
 	| { t: "stream"; sessionId: string; events: AgentStreamEvent[] }
 	| { t: "session.updated"; session: SessionSummary }
 	| { t: "op.call"; callId: string; sessionId: string; op: RemoteOpName; args: RemoteOpArgs; timeoutMs: number }

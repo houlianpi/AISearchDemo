@@ -9,6 +9,7 @@ import {
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createModelRuntime, listModelIds } from "../agent/model.ts";
 import { type Env, maxConcurrentTurns } from "../env.ts";
+import { toHistoryMessages } from "./history.ts";
 import { OpRpc } from "./op-rpc.ts";
 import { Outbox } from "./outbox.ts";
 import { SessionRunner } from "./session-runner.ts";
@@ -161,18 +162,19 @@ export class UserAgentDO extends DurableObject<Env> {
 				const row = this.store.getSession(message.sessionId);
 				if (!row) throw new Error(`unknown session ${message.sessionId}`);
 				this.attach(ws, message.sessionId);
-				const entries = this.store.readEntries(message.sessionId, message.sinceSeq ?? 0);
-				this.sendTo(ws, {
-					t: "history",
-					sessionId: message.sessionId,
-					entries,
-					lastSeq: this.store.lastSeq(message.sessionId),
-				});
+				// Ack first so the client can announce the session before the transcript.
 				this.sendTo(ws, {
 					t: "ack",
 					id: message.id,
 					ok: true,
 					data: { session: toSummary(row, this.runners.get(message.sessionId)?.running ?? false) },
+				});
+				const entries = this.store.readEntries(message.sessionId, message.sinceSeq ?? 0);
+				this.sendTo(ws, {
+					t: "history",
+					sessionId: message.sessionId,
+					messages: toHistoryMessages(entries),
+					lastSeq: this.store.lastSeq(message.sessionId),
 				});
 				return;
 			}

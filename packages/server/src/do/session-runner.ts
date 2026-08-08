@@ -1,7 +1,7 @@
 import type { AgentStreamEvent, SessionUsage } from "@wa/protocol";
 import type { AgentSession, AgentSessionEvent, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { createRemoteSession } from "../agent/session-factory.ts";
-import { PAGE_EXTRACTION_BRIEF } from "../agent/task-prompt.ts";
+import { withBrief } from "../agent/task-prompt.ts";
 import type { Env } from "../env.ts";
 import type { OpRpc } from "./op-rpc.ts";
 import type { Outbox } from "./outbox.ts";
@@ -143,7 +143,7 @@ export class SessionRunner {
 	private brief(text: string): string {
 		if (this.briefed) return text;
 		this.briefed = true;
-		return `<agent_brief>\n${PAGE_EXTRACTION_BRIEF}\n</agent_brief>\n\nNow handle this request:\n\n${text}`;
+		return withBrief(text);
 	}
 	dispose(): void {
 		if (this.disposed) return;
