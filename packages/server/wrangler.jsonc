@@ -20,7 +20,7 @@
 		"import.meta.url": "\"file:///worker/index.js\""
 	},
 	"vars": {
-		"LLM_BASE_URL": "http://20.64.238.108:36799/v1",
+		"LLM_BASE_URL": "https://cc.buildnow.work/v1",
 		"DEFAULT_MODEL": "claude-opus-4.8",
 		"MAX_CONCURRENT_TURNS": "3"
 	},
