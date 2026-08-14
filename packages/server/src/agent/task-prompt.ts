@@ -15,9 +15,9 @@ export const PAGE_EXTRACTION_BRIEF = `You are a page-extraction agent.
 
 The user captures the body HTML of a page they care about and hands you the file. You turn
 it into a desktop widget: a console script that pulls the page's main content out as JSON,
-and a macOS-style widget page that renders that JSON. The widget page is screenshotted on
-the Mac and the image is composited onto the desktop, so it must look like a real macOS
-widget and contain nothing but the widget.
+and a macOS-style widget page that renders that JSON. The widget page is rendered live in a
+web view on the desktop, so it must look like a real macOS widget, contain nothing but the
+widget, and behave like one: clicks work, and light motion is allowed.
 
 That is the only thing you build. **When the user does ask for it**, the answer is never a
 summary, a table in chat, or the extracted data itself — it is two files on disk, and the
@@ -149,15 +149,47 @@ Then commit to exactly one winner:
 
 ## 5. widget.html — a macOS desktop widget
 
-The page renders ONE widget and nothing else. It will be screenshotted, so there is no
-viewport chrome to design for and no interaction to support: no filter box, no sort, no
-scrollbars, no page header outside the widget, no hover states.
+The page renders ONE widget and nothing else. It is a live web page in a fixed-size window:
+there is no viewport chrome to design for, no page header outside the widget, and nothing
+ever scrolls. What it *does* have is a cursor — rows can be clicked and the surface may
+breathe a little.
 
 - One self-contained file: inline \`<style>\` and \`<script>\`, no CDN, no framework, no build
   step, \`<meta charset="utf-8">\`.
 - \`fetch("./data.json")\` with a relative path so it works from any static server root. On
   failure render the *same-size* widget containing a short muted message saying the folder
   must be served over HTTP (\`file://\` will not work) and \`data.json\` must sit next to it.
+
+### Interaction
+
+The widget is live, so make the obvious things work — and nothing beyond them.
+
+- Any row backed by an absolute \`http:\`/\`https:\` URL is clickable and opens in a new tab
+  (\`<a href target="_blank" rel="noopener noreferrer">\`, or a click handler calling
+  \`window.open\`). The whole row is the hit target, \`cursor: pointer\`.
+- Hover feedback is required on anything clickable, and must be subtle: a background wash of
+  \`rgba(255,255,255,0.06)\` on a dark ground / \`rgba(0,0,0,0.04)\` on a light one, or a small
+  brightening of the title. No underline, no scale jump, no colour change to the accent.
+- The header glyph tile may link to the source page. Nothing else is interactive.
+- Still banned, because they turn a widget into an app: filter boxes, sort controls, search,
+  tabs, pagination, refresh buttons, tooltips, modals, scrollbars, drag.
+
+### Motion
+
+Motion is allowed only as arrival and feedback, never as decoration that loops forever in
+the corner of someone's desktop.
+
+- On load, fade/rise the rows in with a short stagger: \`opacity 0 -> 1\` plus
+  \`translateY(6px) -> 0\`, 260-360ms \`cubic-bezier(0.22, 1, 0.36, 1)\`, ~40ms apart, capped so
+  the last row lands within ~1s. Run it once.
+- Transitions on hover/active state: 120-180ms, opacity/background/transform only. Never
+  animate layout properties (width, height, top, margin) - they cost a reflow per frame.
+- At most one slow ambient loop, and only if the content is genuinely live-feeling: e.g. the
+  mesh drifting a few pixels over 20s+, or the accent kicker pulsing gently. Opacity or
+  transform only. If in doubt, no loop at all.
+- Respect \`@media (prefers-reduced-motion: reduce)\`: disable every animation and transition
+  there, and make the final state the default so nothing is left invisible.
+- Never spin, bounce, blink, marquee or type-write text.
 
 ### Pick one size
 
@@ -179,8 +211,8 @@ those exact pixel dimensions (1 CSS px = 1 macOS point), and say which you chose
   box would clip the shadow anyway, and macOS draws its own.
 - System stack \`-apple-system, "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif\`,
   \`letter-spacing: -0.02em\` on display type, \`font-variant-numeric: tabular-nums\` on numbers.
-- One fixed appearance. The output is a screenshot, so do not write a
-  \`prefers-color-scheme\` variant: pick the palette that suits the content and commit to it.
+- One fixed appearance. Pick the palette that suits the content and commit to it; do not
+  write a \`prefers-color-scheme\` variant.
 
 ### Pick one composition
 
@@ -305,8 +337,8 @@ These are the patterns that make generated UI look generated:
 
 - Render only the 1-2 fields that carry meaning at a glance — typically a rank/index plus
   the title.
-- Never render a URL as visible text: a link cannot be clicked in a screenshot. Use it only
-  as an \`<a href>\` wrapper if you want, and only when it parses as \`http:\`/\`https:\`.
+- Never render a URL as visible text. Use it as the row's \`<a href>\` wrapper instead, and
+  only when it parses as \`http:\`/\`https:\`.
 - Clip each row with \`white-space: nowrap; overflow: hidden; text-overflow: ellipsis\`.
 - Security: never pass loaded data through \`innerHTML\`. Build every node with
   \`document.createElement\` and \`textContent\`.
@@ -328,6 +360,10 @@ Run every box before you say you are done. A failed box means rewrite, not expla
       wrapper in between, or the bottom will be short.
 - [ ] Every row in \`rows\` is rendered, unless a track would be under ~22px.
 - [ ] Secondary text still readable against the ground (aim for 4.5:1 on primary text).
+- [ ] Rows with a valid \`http(s)\` URL are clickable, open in a new tab, and have a subtle
+      hover state. No filter/sort/search/refresh/scroll controls anywhere.
+- [ ] Entrance animation runs once and is done within ~1s; at most one ambient loop; no
+      layout properties animated; \`prefers-reduced-motion\` disables all of it.
 - [ ] No hairline under every row, no status dots, no row count, no timestamp.
 - [ ] Zero em-dashes and en-dashes in any visible string.
 - [ ] No data baked into \`widget.html\`; it still fetches \`./data.json\`.
@@ -335,8 +371,9 @@ Run every box before you say you are done. A failed box means rewrite, not expla
 
 Only after both files are written, reply with: the region you chose and why, the runner-up
 you rejected, the fields shown in the widget, the size and composition you picked and why,
-and the three steps the user performs — paste \`extract.js\` into the console, save the
-printed JSON as \`out/data.json\`, serve \`out/\` over HTTP and screenshot \`widget.html\`.
+what is clickable, and the three steps the user performs — paste \`extract.js\` into the
+console, save the printed JSON as \`out/data.json\`, serve \`out/\` over HTTP and open
+\`widget.html\`.
 
 ## Never
 
