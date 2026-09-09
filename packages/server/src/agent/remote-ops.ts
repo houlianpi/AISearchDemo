@@ -10,6 +10,14 @@ import type {
 import { DEFAULT_BASH_TIMEOUT_MS, type OpRpc } from "../do/op-rpc.ts";
 
 /**
+ * Bytes requested per `fs.readFile` round trip.
+ *
+ * Base64 inflates this by 4/3 (~683 KB) and the JSON envelope adds a little
+ * more, which leaves comfortable headroom under Cloudflare's 1 MiB frame cap.
+ */
+const READ_CHUNK_BYTES = 512 * 1024;
+
+/**
  * pi's tools, wired to a remote executor.
  *
  * pi deliberately exposes an `*Operations` seam on every built-in tool
@@ -33,9 +41,37 @@ export function createRemoteOperations(rpc: OpRpc, sessionId: string) {
 		},
 	};
 
+	/**
+	 * Reads a file that may be larger than one WebSocket frame.
+	 *
+	 * Cloudflare caps an inbound frame at 1 MiB and base64 inflates by 4/3, so a
+	 * whole-file response is only safe for small files. The first call learns the
+	 * real size; anything bigger is pulled as successive byte ranges.
+	 */
 	const readFile = async (path: string): Promise<Buffer> => {
-		const { base64 } = await rpc.call({ op: "fs.readFile", args: { path }, sessionId });
-		return Buffer.from(base64, "base64");
+		const first = await rpc.call({
+			op: "fs.readFile",
+			args: { path, offset: 0, length: READ_CHUNK_BYTES },
+			sessionId,
+		});
+		const head = Buffer.from(first.base64, "base64");
+		if (head.length >= first.size) return head;
+
+		const parts = [head];
+		let read = head.length;
+		while (read < first.size) {
+			const next = await rpc.call({
+				op: "fs.readFile",
+				args: { path, offset: read, length: READ_CHUNK_BYTES },
+				sessionId,
+			});
+			const chunk = Buffer.from(next.base64, "base64");
+			// A truncated or vanished file would otherwise spin here forever.
+			if (chunk.length === 0) break;
+			parts.push(chunk);
+			read += chunk.length;
+		}
+		return Buffer.concat(parts);
 	};
 
 	const read: ReadOperations = {

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { posix } from "node:path";
 import type { RemoteOpArgs, RemoteOpName, RemoteOpResult } from "@wa/protocol";
@@ -63,9 +63,25 @@ const handlers: { [K in RemoteOpName]: Handler<K> } = {
 		});
 	},
 
-	"fs.readFile": async ({ path }, ctx) => ({
-		base64: (await readFile(absolute(path, ctx.cwd))).toString("base64"),
-	}),
+	"fs.readFile": async ({ path, offset, length }, ctx) => {
+		const target = absolute(path, ctx.cwd);
+		const size = (await stat(target)).size;
+		// Whole-file read: keep the simple path for the common small case.
+		if (offset === undefined && length === undefined) {
+			return { base64: (await readFile(target)).toString("base64"), size };
+		}
+		const start = Math.max(0, offset ?? 0);
+		const want = Math.max(0, Math.min(length ?? size - start, size - start));
+		if (want === 0) return { base64: "", size };
+		const handle = await open(target, "r");
+		try {
+			const buffer = Buffer.alloc(want);
+			const { bytesRead } = await handle.read(buffer, 0, want, start);
+			return { base64: buffer.subarray(0, bytesRead).toString("base64"), size };
+		} finally {
+			await handle.close();
+		}
+	},
 
 	"fs.writeFile": async ({ path, content }, ctx) => {
 		await writeFile(absolute(path, ctx.cwd), content, "utf-8");

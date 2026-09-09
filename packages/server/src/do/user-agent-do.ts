@@ -84,7 +84,13 @@ export class UserAgentDO extends DurableObject<Env> {
 	override async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
 		if (typeof raw !== "string") return;
 		if (raw.length > MAX_INBOUND_MESSAGE_BYTES) {
-			this.sendTo(ws, { t: "fatal", message: "message too large" });
+			// Fail the specific tool call if we can still identify it. Dropping the
+			// frame silently would leave that call pending until its timeout, so the
+			// turn would appear to hang long after the client already gave up.
+			const callId = callIdOf(raw);
+			const detail = `client frame of ${raw.length} bytes exceeds the ${MAX_INBOUND_MESSAGE_BYTES} byte limit`;
+			if (callId) this.rpc.reject(callId, detail);
+			else this.sendTo(ws, { t: "fatal", message: detail });
 			return;
 		}
 
@@ -360,6 +366,17 @@ export class UserAgentDO extends DurableObject<Env> {
 		clearInterval(this.keepalive);
 		this.keepalive = undefined;
 	}
+}
+
+/**
+ * Extracts a `callId` from a frame too large to parse as JSON.
+ *
+ * The oversize frame is almost always an `op.result`, whose `callId` sits in
+ * the first few dozen bytes ahead of the payload, so a scan of the prefix finds
+ * it without materialising the rest.
+ */
+function callIdOf(raw: string): string | undefined {
+	return /"callId"\s*:\s*"([^"]+)"/.exec(raw.slice(0, 512))?.[1];
 }
 
 function base64ToBytes(base64: string): Uint8Array {

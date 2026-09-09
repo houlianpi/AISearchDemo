@@ -38,9 +38,15 @@ export interface RemoteOpMap {
 		result: { exitCode: number | null };
 	};
 	"fs.readFile": {
-		args: { path: string };
+		/**
+		 * `offset`/`length` are byte ranges into the file. A Cloudflare WebSocket
+		 * frame is capped at 1 MiB and base64 inflates by 4/3, so a captured page
+		 * of a few hundred KB cannot come back in one response. The server reads
+		 * large files as a sequence of chunks and concatenates them.
+		 */
+		args: { path: string; offset?: number; length?: number };
 		/** base64 so binary files (images) survive the JSON hop */
-		result: { base64: string };
+		result: { base64: string; size: number };
 	};
 	"fs.writeFile": {
 		args: { path: string; content: string };
