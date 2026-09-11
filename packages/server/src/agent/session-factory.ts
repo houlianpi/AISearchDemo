@@ -23,7 +23,7 @@ import {
 import type { OpRpc } from "../do/op-rpc.ts";
 import type { Env } from "../env.ts";
 import { createHtmlProbeToolDefinition } from "./html-probe.ts";
-import { resolveModel, resolveRestoredModel } from "./model.ts";
+import { defaultThinkingLevel, resolveModel, resolveRestoredModel } from "./model.ts";
 import { createRemoteOperations } from "./remote-ops.ts";
 import { PAGE_EXTRACTION_BRIEF } from "./task-prompt.ts";
 
@@ -107,7 +107,9 @@ export async function createRemoteSession(options: CreateRemoteSessionOptions): 
 	const model = options.modelId
 		? resolveModel(modelRuntime, env, options.modelId)
 		: resolveRestoredModel(modelRuntime, env, restored?.model);
-	const thinkingLevel = restored && toThinkingLevel(restored.thinkingLevel);
+	// A restored session keeps whatever level it was created with; only a new
+	// session picks up the provider's default.
+	const thinkingLevel = restored ? toThinkingLevel(restored.thinkingLevel) : defaultThinkingLevel(env);
 
 	const { session } = await createAgentSession({
 		cwd,

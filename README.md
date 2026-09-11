@@ -143,12 +143,41 @@ server/
 | 工具 | 不重写工具，而是实现 pi 自己留的 `BashOperations` / `ReadOperations` / `EditOperations` / `WriteOperations` / `LsOperations` / `FindOperations` | pi 源码注释原文："Override these to delegate ... to remote systems (for example SSH)"；这样参数校验、截断、diff、prompt 文案全部保留，只换 IO 层 |
 | 工具注册 | `createAgentSession({ customTools, tools })`，同名 customTools 在注册表中覆盖内置工具 | `_refreshToolRegistry` 中 custom 在 builtin 之后 set |
 | 路径 | 服务端一律用虚拟根 `/workspace` 解析，客户端映射到真实 cwd 并校验越界 | Workers 的 `node:path` 只有 POSIX 语义，直接传 `D:\repo` 会解析错 |
-| 模型接入 | `ModelRuntime.create({ credentials: InMemoryCredentialStore, modelsPath: null })` + `registerProvider("gateway", { api: "openai-completions", ... })` | 全内存，密钥留在 Workers Secret |
+| 模型接入 | `ModelRuntime.create({ credentials: InMemoryCredentialStore, modelsPath: null })` + `registerProvider(<当前 provider>, { api: "openai-completions", ... })` | 全内存，密钥留在 Workers Secret |
+| 多 provider | 两家网关（`gateway` = Opus/GPT，`deepseek`）都是 OpenAI 兼容，catalog 各自一份，`LLM_PROVIDER` 选定**唯一**生效的一家，只注册它 | 两家都注册的话，没配第二家的 key 会变成启动硬失败；而实际上同一部署只用一家 |
 | 扩展 | 关闭（`noExtensions: true`）。将来用 `DefaultResourceLoader({ extensionFactories })` 编译期内联 | jiti 动态加载 TS 在 Workers 不可用（无 eval / 无动态 import） |
 | 协议 | 自建 JSON over WS，词表对齐 pi RPC mode | `@earendil-works/pi-client` + `pi-protocol` 是 CBOR、官方标注 Experimental，且不支持客户端执行工具 |
 | 并发 | 单 DO 内多 session，同时 streaming 的 session 数上限由 `MAX_CONCURRENT_TURNS` 控制（默认 3） | |
 
+### 模型 provider（Opus / DeepSeek）
+
+同一部署同一时刻只跑**一家**上游，由 `LLM_PROVIDER` 决定；切换 = 改配置 + 重启/重新部署，不是每会话可选项。
+
+| provider | baseUrl 变量 | key 变量 | 默认模型变量 | 可用模型 |
+| --- | --- | --- | --- | --- |
+| `gateway`（默认） | `LLM_BASE_URL` | `LLM_API_KEY` | `DEFAULT_MODEL` | `claude-opus-4.8/4.7/4.5`、`claude-sonnet-4.5`、`gpt-5.6-sol`、`gpt-5.5` |
+| `deepseek` | `DEEPSEEK_BASE_URL` | `DEEPSEEK_API_KEY` | `DEEPSEEK_DEFAULT_MODEL` | `deepseek-v4-pro`、`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp` |
+
+定义都在 [`packages/server/src/agent/model.ts`](packages/server/src/agent/model.ts) 的 `PROVIDERS` 数组里，加第三家只需要再追加一项。
+
+`createModelRuntime` **只注册当前选中的那一家**。两家都注册的话，没配 DeepSeek key 的部署会在启动时就炸，而那个 key 其实压根用不到。
+
+两家的 `compat` 不同（都是实测出来的，不是抄默认值）：
+
+| compat 项 | gateway | deepseek | 原因 |
+| --- | --- | --- | --- |
+| `supportsDeveloperRole` | `false` | `false` | gateway 静默丢弃 `role: "developer"`；DeepSeek 直接 400：``unknown variant `developer` `` |
+| `thinkingFormat` | 默认 `openai` | `deepseek` | DeepSeek 接受 `thinking: { type }`，推理内容走 `reasoning_content`（pi 的 `openai-completions` 已原生识别并转成 `thinking_delta`） |
+| `maxTokensField` | 自动探测 | `max_tokens` | DeepSeek 两个字段都收，钉死避免 URL 探测猜错 |
+
+只有 `deepseek-v4-flash-vision-exp` 声明 `input: ["text", "image"]`，另外两个是纯文本。
+
+**切换 provider 对既有会话的影响**：`resolveRestoredModel` 发现持久化的模型不属于当前 provider 时，会回退到新 provider 的默认模型，而不是报错。也就是说切完 `LLM_PROVIDER`，老会话仍然打得开、历史仍然完整，但会**迁移到新家的默认模型**上。这跟下面第 ④ 条冒烟测试（"模型不跟随默认值漂移"）在语义上是有张力的：那条约束只在 provider 不变时成立。反过来做——老会话直接不可用——显然更糟。
+
+另外这必然是一次**缓存前缀失效**：换了上游，prefill 缓存从头重建。
+
 ### 打包结果
+
 
 | 指标 | 值 | 限制 |
 | --- | --- | --- |
@@ -251,10 +280,25 @@ npm install
 
 ```powershell
 Copy-Item packages\server\.dev.vars.example packages\server\.dev.vars
-# 编辑 .dev.vars，填入 LLM_API_KEY
+# 编辑 .dev.vars，填入当前 provider 需要的那个 key
 ```
 
-`.dev.vars` 已在 `.gitignore` 中，不会提交。
+`.dev.vars` 已在 `.gitignore` 中，不会提交。只有 `LLM_PROVIDER` 选中的那一家的 key 是必需的，
+另一个留占位符也能正常启动。
+
+### 2.5 切换 Opus / DeepSeek
+
+改 `packages/server/wrangler.jsonc` 的 `vars.LLM_PROVIDER`：
+
+```jsonc
+"LLM_PROVIDER": "gateway",   // Opus / GPT
+"LLM_PROVIDER": "deepseek",  // DeepSeek
+```
+
+然后**重启 `npm run dev`** —— wrangler 不会对 `wrangler.jsonc` 的改动做热重载，
+不重启的话你会以为切了其实没切。生产环境同样是改配置后 `npm run deploy`。
+
+验证切没切成功：新建会话时 `ack` 里的 `models` 数组就是当前 provider 的 catalog。
 
 ### 3. 启动服务端
 
@@ -263,7 +307,7 @@ npm run dev
 ```
 
 看到 `Ready on http://127.0.0.1:8787` 即成功。绑定信息里应能看到
-`USER_AGENT (Durable Object)` 与 4 个环境变量。
+`USER_AGENT (Durable Object)`、`LLM_PROVIDER` 当前的取值，以及两家 provider 的变量与 key。
 
 ### 4. 启动客户端（另开一个终端）
 
@@ -340,6 +384,17 @@ $env:WA_USER_ID = "alice"; npm run client
 console.log(`[session] ${sessionId} model=${model.id} thinking=${thinkingLevel ?? "default"}`);
 ```
 
+注意这条只在 **provider 不变**时成立。换了 `LLM_PROVIDER`，老会话会迁移到新 provider 的默认模型
+（见上面「模型 provider」一节）。
+
+**⑤ provider 切换**
+
+把 `LLM_PROVIDER` 改成 `deepseek`，重启 `npm run dev`，然后跑一遍 ① 的工具链路用例。
+应该能看到同样的 `✓ ls` / `✓ read` 和真实的本机内容 —— 换上游不改变工具语义。
+
+DeepSeek 会先吐一段 `thinking_delta` 再出正文（`reasoning_content` 被 pi 映射成了思考流），
+这是预期行为，不是把推理泄漏进了正文。
+
 ### 6. 静态检查
 
 ```powershell
@@ -361,15 +416,19 @@ npm run bundle:check   # 打包并输出 Worker 体积
 ## 七、部署
 
 ```powershell
+# 只需要放当前 LLM_PROVIDER 选中的那一家的 key
 npx wrangler secret put LLM_API_KEY -c packages\server\wrangler.jsonc
+npx wrangler secret put DEEPSEEK_API_KEY -c packages\server\wrangler.jsonc
 npm run deploy
 ```
 
 生产环境需要先确认：
 
-- `LLM_BASE_URL` 目前是明文 HTTP + 非标准端口，生产应换成 HTTPS
+- `LLM_PROVIDER` 指向的是你想要的那一家，且对应的 key 已经 `secret put` 过
 - `MAX_CONCURRENT_TURNS` 是否需要调整
 - **身份校验必须换掉原型桩**（见下一节）
+
+两家 key 都提前放进 secret store 的话，后续切 provider 就只是改 `vars.LLM_PROVIDER` 再 deploy 一次。
 
 ---
 

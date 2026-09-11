@@ -263,7 +263,20 @@ function findRegions(root: Node): Region[] {
 		if (wrapsOthers) region.score *= 0.08;
 	}
 
-	return regions.sort((a, b) => b.score - a.score);
+	// Near-identical siblings (the same component repeated across page sections)
+	// otherwise fill the ranked list with duplicates, pushing real alternatives
+	// off the visible top-10 and making the output look like noise.
+	const seen = new Set<string>();
+	const deduped = regions
+		.sort((a, b) => b.score - a.score)
+		.filter((region) => {
+			const key = `${region.containerSelector}|${region.itemSelector}|${region.items.length}`;
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
+
+	return deduped;
 }
 
 /** A region is a container whose children repeat: >= 3 siblings sharing tag + a class token. */
@@ -312,7 +325,12 @@ function candidate(node: Node): Region | undefined {
 	return {
 		container: node,
 		containerSelector: selectorOf(node),
-		itemSelector: token ? `${first.tag}.${token}` : first.tag,
+		// Records often share no class at all (styled-components emit a class on
+		// the container and leave children bare). A naked `div` is useless to the
+		// caller — it matches the whole document — so scope it to the container
+		// instead. This is the selector the model copies into extract.js, so it
+		// has to be one that actually resolves.
+		itemSelector: token ? `${first.tag}.${token}` : `${selectorOf(node)} > ${first.tag}`,
 		items: best.items,
 		totalText: best.totalText,
 		averageText,
@@ -337,6 +355,35 @@ function outline(node: Node, depth: number, budget: { left: number }): string[] 
 
 const MAX_OUTPUT = 24_000;
 
+/**
+ * Removes markup that can never contain extractable content, once, before any
+ * mode runs.
+ *
+ * Measured on a 488 KB nintendo.com capture: `<svg>` blocks are 56.9% of the
+ * file and their `d="M..."` path data alone is 44.7%. Captures arriving here are
+ * already script/style-free (the extension strips those), so icon vector data —
+ * not JavaScript — is what actually buries the content. Leaving it in costs real
+ * probe round-trips: `search` hits land inside path coordinates and `slice`
+ * windows open onto bezier curves, and every such miss is another LLM turn.
+ *
+ * Every mode must share this exact string: node offsets from `parse()` and the
+ * raw windows returned by `slice`/`search` are offsets into it. Opening tags are
+ * kept so the tree shape and any `id`/`class` survive, keeping the DOM valid for
+ * selector authoring; only the inert body is dropped.
+ */
+function prepare(source: string): { html: string; original: number } {
+	// `\x3C!--` is how a comment survives being captured through a JS string.
+	let html = source.replace(/(?:<|\\x3C)!--[\s\S]*?-->/g, "");
+	for (const tag of ["script", "style", "noscript", "template", "svg"]) {
+		html = html.replace(new RegExp(`(<${tag}\\b[^>]*>)[\\s\\S]*?</${tag}\\s*>`, "gi"), `$1</${tag}>`);
+	}
+	// Icons that are a bare <path>/<use> outside a matched <svg> pair, plus
+	// oversized inline data: URIs, which are equally unreadable and equally large.
+	html = html.replace(/\sd="[^"]{200,}"/gi, ' d="…"');
+	html = html.replace(/(["'(])data:[^"')\s]{200,}/gi, "$1data:…");
+	return { html, original: source.length };
+}
+
 export interface HtmlProbeOptions {
 	/** Reads a file from the client, given a path already resolved against the session cwd. */
 	readFile: (path: string) => Promise<string>;
@@ -348,7 +395,10 @@ const probeSchema = Type.Object({
 	mode: Type.Optional(
 		Type.Union([Type.Literal("regions"), Type.Literal("outline"), Type.Literal("search"), Type.Literal("slice")], {
 			description:
-				"regions: ranked candidate content regions (default). outline: tag/class tree of one record. search: locate a string. slice: raw markup window.",
+				"Step 1 regions (default): ranked candidate content regions — start here. " +
+				"Step 2 outline: tag/class tree of one record, for writing field selectors. " +
+				"Then, only to fill a specific gap: search (verify a known string) or slice (raw markup window). " +
+				"search/slice are not for locating the content region; regions already did that.",
 		}),
 	),
 	selector: Type.Optional(
@@ -364,7 +414,16 @@ export function createHtmlProbeToolDefinition(options: HtmlProbeOptions): ToolDe
 		name: "html_probe",
 		label: "html_probe",
 		description:
-			"Analyse a saved HTML page structurally. Use this instead of read/bash for captured pages: they are usually one minified line that read refuses and that shell one-liners cannot inspect portably. mode=regions ranks the repeating content regions of the page (this is how you find the main content); mode=outline dumps the tag/class tree of one record so you can write field selectors; mode=search locates a string; mode=slice returns raw markup.",
+			"Analyse a saved HTML page structurally. Use this instead of read/bash for captured pages: they are usually one minified line that read refuses and that shell one-liners cannot inspect portably.\n" +
+			"\n" +
+			"Follow this funnel in order. Each step narrows the last one; skipping ahead is what makes this slow.\n" +
+			"1. mode=regions (start here, always) — ranks the repeating content regions and prints the container/item selector of each. The top-ranked region is almost always the content you want.\n" +
+			"2. mode=outline selector=<the itemSelector from step 1> — dumps one record's tag/class tree plus its raw markup. This is where you read off the field selectors for extract.js.\n" +
+			"3. mode=slice / mode=search — only for filling a specific gap left by steps 1-2, e.g. confirming a value you could not see in the outline.\n" +
+			"\n" +
+			"Two steps are usually enough to write the extractor. If you are on your fifth probe and still looking for the content region, stop searching and re-read the step-1 output: the answer is in the ranked list.\n" +
+			"Do not use mode=search to hunt for the content region — search is for verifying a known string, not for locating structure. Do not scan with mode=slice at arbitrary offsets.\n" +
+			"All offsets refer to the text after script/style/comments are stripped, which mode=regions reports.",
 		promptSnippet: "Analyse a saved HTML page's structure",
 		parameters: probeSchema,
 		async execute(_toolCallId, params) {
@@ -380,14 +439,12 @@ export function createHtmlProbeToolDefinition(options: HtmlProbeOptions): ToolDe
 
 function report(source: string, params: { mode?: string; selector?: string; query?: string; offset?: number; length?: number }): string {
 	const mode = params.mode ?? "regions";
-	// Stripped once so parsed node offsets and the raw slices below agree.
-	// `\x3C!--` is how a comment survives being captured through a JS string.
-	const html = source.replace(/(?:<|\\x3C)!--[\s\S]*?-->/g, "");
+	const { html, original } = prepare(source);
 
 	if (mode === "slice") {
 		const start = Math.max(0, params.offset ?? 0);
 		const size = Math.min(params.length ?? 4000, 8000);
-		return `chars ${start}-${start + size} of ${html.length}\n\n${html.slice(start, start + size)}`;
+		return `chars ${start}-${start + size} of ${html.length} (script/style stripped)\n\n${html.slice(start, start + size)}`;
 	}
 
 	if (mode === "search") {
@@ -397,7 +454,9 @@ function report(source: string, params: { mode?: string; selector?: string; quer
 		for (let index = html.indexOf(query); index !== -1 && hits.length < 50; index = html.indexOf(query, index + 1)) {
 			hits.push(index);
 		}
-		if (hits.length === 0) return `"${query}" not found.`;
+		if (hits.length === 0) {
+			return `"${query}" not found (searched the ${html.length} chars remaining after script/style were stripped — it may have been inside one of those). Do not retry with another guess: run mode=regions and read the ranked list instead.`;
+		}
 		const first = hits[0] ?? 0;
 		return [
 			`${hits.length}${hits.length === 50 ? "+" : ""} occurrences of "${query}"`,
@@ -412,9 +471,28 @@ function report(source: string, params: { mode?: string; selector?: string; quer
 	const regions = findRegions(root);
 
 	if (mode === "outline") {
-		const selector = params.selector;
-		const region = selector ? regions.find((entry) => entry.itemSelector === selector) : regions[0];
-		if (!region) return `No region matches selector "${selector}". Run mode=regions first.`;
+		const selector = params.selector?.trim();
+		// Accept the container selector too. Models routinely pass whichever of the
+		// two they find more meaningful, and a rejection here sends them off on a
+		// blind search/slice hunt that costs several turns.
+		const region = selector
+			? (regions.find((entry) => entry.itemSelector === selector) ??
+				regions.find((entry) => entry.containerSelector === selector) ??
+				regions.find((entry) => entry.itemSelector.replace(/\s+/g, "") === selector.replace(/\s+/g, "")))
+			: regions[0];
+		if (!region) {
+			// Show what is actually on offer so the next call is guaranteed to hit.
+			const available = regions
+				.slice(0, 8)
+				.map((entry, index) => `  #${index + 1} item=${entry.itemSelector}   (in ${entry.containerSelector}, ${entry.items.length} records)`)
+				.join("\n");
+			return [
+				`No region has itemSelector "${selector}".`,
+				"",
+				"Available (pass one of these itemSelectors verbatim):",
+				available || "  (none — the page has no repeating region)",
+			].join("\n");
+		}
 		const sample = region.items[0];
 		if (!sample) return "Region has no records.";
 		return [
@@ -431,7 +509,8 @@ function report(source: string, params: { mode?: string; selector?: string; quer
 
 	const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? "";
 	const lines = [
-		`file: ${html.length} chars, ${html.split("\n").length} line(s)`,
+		`file: ${html.length} chars after stripping script/style/comments (raw capture was ${original})`,
+		`All offsets in every html_probe mode refer to this stripped text.`,
 		`<title>: ${normalize(decodeEntities(title)) || "(none)"}`,
 		"",
 		`${regions.length} repeating region(s), ranked. The top one is almost always the main content.`,

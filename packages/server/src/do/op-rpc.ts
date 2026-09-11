@@ -20,6 +20,8 @@ interface PendingOp {
 	onUpdate?: (chunk: Uint8Array) => void;
 	timer: ReturnType<typeof setTimeout>;
 	detach: () => void;
+	op: string;
+	startedAt: number;
 }
 
 export interface OpTransport {
@@ -75,6 +77,8 @@ export class OpRpc {
 				onUpdate,
 				timer,
 				detach: () => signal?.removeEventListener("abort", onAbort),
+				op,
+				startedAt: Date.now(),
 			});
 
 			const delivered = this.transport.send({
@@ -121,6 +125,9 @@ export class OpRpc {
 		this.pending.delete(callId);
 		clearTimeout(entry.timer);
 		entry.detach();
+		// Round-trip as seen by the DO: serialise + WS + client work + WS back.
+		// Compare against the tool-level timing to isolate transport overhead.
+		console.log(`[timing] rpc ${entry.op} ${Date.now() - entry.startedAt}ms`);
 		settle();
 	}
 }

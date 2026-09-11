@@ -12,6 +12,148 @@ const TOOL_OUTPUT_PREVIEW = 4_000;
 /** Workers caps log data at 256 KB per request; a `write` call alone can exceed that. */
 const TOOL_ARGS_LOG_LIMIT = 1000;
 
+/**
+ * Per-turn latency accounting.
+ *
+ * A slow turn has only three possible culprits: the model thinking/generating,
+ * the client executing a tool, or our own bookkeeping. The agent loop strictly
+ * alternates between "waiting on the LLM" and "waiting on tools", so timing the
+ * tool spans and subtracting them from the wall clock attributes the remainder
+ * to the model without needing a hook inside pi's streaming code.
+ */
+class TurnTimer {
+	private readonly sessionId: string;
+	private readonly startedAt = Date.now();
+	/** Wall-clock ms spent inside tool execution (union of spans, not sum). */
+	private toolWall = 0;
+	private toolDepth = 0;
+	private toolSpanStart = 0;
+	private firstTokenAt: number | undefined;
+	private readonly open = new Map<string, { name: string; at: number }>();
+	private readonly byTool = new Map<string, { calls: number; ms: number }>();
+	/** Start of the current assistant message, for per-roundtrip LLM latency. */
+	private messageStart: number | undefined;
+	private messageIndex = 0;
+	/** Per-message streaming detail, reset by `messageBegin`. */
+	private msgFirstDelta: number | undefined;
+	private msgLastDelta: number | undefined;
+	private msgThinkChars = 0;
+	private msgTextChars = 0;
+	private msgArgsChars = 0;
+	private msgMaxGap = 0;
+
+	constructor(sessionId: string) {
+		this.sessionId = sessionId;
+	}
+
+	markFirstToken(): void {
+		this.firstTokenAt ??= Date.now();
+	}
+
+	messageBegin(): void {
+		this.messageStart = Date.now();
+		this.msgFirstDelta = undefined;
+		this.msgThinkChars = 0;
+		this.msgTextChars = 0;
+		this.msgArgsChars = 0;
+		this.msgLastDelta = undefined;
+		this.msgMaxGap = 0;
+	}
+
+	/**
+	 * One streamed delta. Splitting a roundtrip into "time to first delta" and
+	 * "time spent streaming" is the only way to tell a slow *provider* from a
+	 * verbose *model*: a long prefill means we waited on the gateway (queueing,
+	 * cache miss, prompt ingestion), while a long stream with many thinking
+	 * characters means the model genuinely generated that much.
+	 */
+	delta(kind: "thinking" | "text" | "args", chars: number): void {
+		const now = Date.now();
+		this.msgFirstDelta ??= now;
+		if (this.msgLastDelta !== undefined) {
+			this.msgMaxGap = Math.max(this.msgMaxGap, now - this.msgLastDelta);
+		}
+		this.msgLastDelta = now;
+		if (kind === "thinking") this.msgThinkChars += chars;
+		else if (kind === "args") this.msgArgsChars += chars;
+		else this.msgTextChars += chars;
+	}
+
+	/** One LLM roundtrip finished. `stopReason` distinguishes a tool hop from the final answer. */
+	messageDone(stopReason: string | undefined, contextTokens?: number | null): void {
+		if (this.messageStart === undefined) return;
+		const now = Date.now();
+		const ms = now - this.messageStart;
+		const prefill = this.msgFirstDelta === undefined ? ms : this.msgFirstDelta - this.messageStart;
+		const stream = this.msgFirstDelta === undefined ? 0 : now - this.msgFirstDelta;
+		// ~4 chars/token is close enough to compare roundtrips against each other.
+		const emitted = this.msgThinkChars + this.msgTextChars + this.msgArgsChars;
+		const rate = stream > 0 ? Math.round((emitted / 4 / stream) * 1000) : 0;
+		this.messageStart = undefined;
+
+		console.log(
+			`[timing] ${this.sessionId} llm#${++this.messageIndex} ${ms}ms stop=${stopReason ?? "?"}` +
+				` prefill=${prefill}ms stream=${stream}ms` +
+				` think=${this.msgThinkChars}ch text=${this.msgTextChars}ch args=${this.msgArgsChars}ch` +
+				(rate > 0 ? ` ~${rate}tok/s` : "") +
+				(contextTokens ? ` ctx=${contextTokens}` : "") +
+				(this.msgMaxGap > 2000 ? ` maxGap=${this.msgMaxGap}ms` : ""),
+		);
+	}
+
+	toolStart(callId: string, name: string): void {
+		const now = Date.now();
+		// Parallel tool calls overlap; only the outermost span counts toward wall time.
+		if (this.toolDepth === 0) {
+			this.toolSpanStart = now;
+		}
+		this.toolDepth++;
+		this.open.set(callId, { name, at: now });
+	}
+
+	toolEnd(callId: string, name: string, isError: boolean): void {
+		const now = Date.now();
+		const started = this.open.get(callId);
+		this.open.delete(callId);
+		if (this.toolDepth > 0) {
+			this.toolDepth--;
+			if (this.toolDepth === 0) this.toolWall += now - this.toolSpanStart;
+		}
+		if (!started) return;
+
+		const ms = now - started.at;
+		const bucket = this.byTool.get(name) ?? { calls: 0, ms: 0 };
+		bucket.calls++;
+		bucket.ms += ms;
+		this.byTool.set(name, bucket);
+		console.log(`[timing] ${this.sessionId} tool ${name} ${ms}ms${isError ? " ERROR" : ""}`);
+	}
+
+	/** One line summarising where the turn's wall clock actually went. */
+	report(): void {
+		const total = Date.now() - this.startedAt;
+		const llm = Math.max(0, total - this.toolWall);
+		const ttft = this.firstTokenAt ? this.firstTokenAt - this.startedAt : undefined;
+		const breakdown = [...this.byTool.entries()]
+			.sort((a, b) => b[1].ms - a[1].ms)
+			.map(([name, b]) => `${name}×${b.calls}=${b.ms}ms`)
+			.join(" ");
+
+		console.log(
+			`[timing] ${this.sessionId} TURN total=${total}ms` +
+				` llm=${llm}ms(${pct(llm, total)}) tools=${this.toolWall}ms(${pct(this.toolWall, total)})` +
+				(ttft === undefined ? "" : ` ttft=${ttft}ms`) +
+				` llmCalls=${this.messageIndex}` +
+				(breakdown ? ` | ${breakdown}` : ""),
+		);
+	}
+}
+
+function pct(part: number, total: number): string {
+	return total > 0 ? `${Math.round((part / total) * 100)}%` : "0%";
+}
+
+
 /** Events after which the entry log is drained to SQLite. */
 const PERSIST_AFTER = new Set<AgentSessionEvent["type"]>([
 	"message_end",
@@ -39,6 +181,7 @@ export class SessionRunner {
 	private persistedEntries: number;
 	private briefed: boolean;
 	private activeTurn: Promise<void> | undefined;
+	private turnTimer: TurnTimer | undefined;
 	private disposed = false;
 
 	private constructor(params: {
@@ -117,6 +260,9 @@ export class SessionRunner {
 
 		this.maybeSetTitle(text);
 
+		const timer = new TurnTimer(this.sessionId);
+		this.turnTimer = timer;
+
 		const turn = this.session
 			.prompt(this.brief(text))
 			.catch((error: unknown) => {
@@ -124,6 +270,8 @@ export class SessionRunner {
 			})
 			.finally(() => {
 				this.activeTurn = undefined;
+				this.turnTimer = undefined;
+				timer.report();
 				this.persist();
 				this.outbox.pushAndFlush(this.sessionId, { k: "agent_end", usage: this.usage() });
 			});
@@ -188,16 +336,31 @@ export class SessionRunner {
 			case "entry_appended":
 				this.persist();
 				return;
+			case "message_start":
+				this.turnTimer?.messageBegin();
+				return;
 			case "message_update": {
 				const inner = event.assistantMessageEvent;
 				if (inner.type === "text_delta") {
+					this.turnTimer?.markFirstToken();
+					this.turnTimer?.delta("text", inner.delta.length);
 					this.outbox.push(this.sessionId, { k: "text_delta", text: inner.delta });
 				} else if (inner.type === "thinking_delta") {
+					this.turnTimer?.markFirstToken();
+					this.turnTimer?.delta("thinking", inner.delta.length);
 					this.outbox.push(this.sessionId, { k: "thinking_delta", text: inner.delta });
+				} else if (inner.type === "toolcall_delta") {
+					// Tool arguments stream as their own deltas. For this agent they
+					// ARE the deliverable — a `write` call carries the whole file —
+					// so leaving them out made long roundtrips look like unexplained
+					// stalls (6.2s reported as think=288ch while emitting a 7 KB file).
+					this.turnTimer?.markFirstToken();
+					this.turnTimer?.delta("args", inner.delta.length);
 				}
 				return;
 			}
 			case "tool_execution_start":
+				this.turnTimer?.toolStart(event.toolCallId, event.toolName);
 				console.log(
 					`[tool] ${this.sessionId} ${event.toolCallId} ${event.toolName} ${formatArgsForLog(event.args)}`,
 				);
@@ -216,6 +379,7 @@ export class SessionRunner {
 				});
 				return;
 			case "tool_execution_end":
+				this.turnTimer?.toolEnd(event.toolCallId, event.toolName, event.isError);
 				this.outbox.push(this.sessionId, {
 					k: "tool_end",
 					toolCallId: event.toolCallId,
@@ -226,6 +390,9 @@ export class SessionRunner {
 				return;
 			case "message_end": {
 				const message = event.message as { role?: string; stopReason?: string; errorMessage?: string };
+				if (message.role !== "user") {
+					this.turnTimer?.messageDone(message.stopReason, this.session.getContextUsage()?.tokens);
+				}
 				this.outbox.push(this.sessionId, {
 					k: "message_end",
 					role: message.role ?? "assistant",

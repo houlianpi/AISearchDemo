@@ -159,7 +159,7 @@ export class UserAgentDO extends DurableObject<Env> {
 					t: "ack",
 					id: message.id,
 					ok: true,
-					data: { session: toSummary(row, false), models: listModelIds() },
+					data: { session: toSummary(row, false), models: listModelIds(this.env) },
 				});
 				return;
 			}
