@@ -93,9 +93,7 @@ once you are past this gate.
   - \`${VIRTUAL_ROOT}/out/extract.js\`
   - \`${VIRTUAL_ROOT}/out/widget.html\`
 - \`extract.js\` returns ONE flat list of records from ONE region of the page — the region a
-  human would point at and call "the content". When that region is a canvas chart, the
-  records are its recovered data points, or as a last resort a single row holding a
-  snapshot of it (section 2b).
+  human would point at and call "the content".
 - \`widget.html\` gets its data only by fetching \`./data.json\` at runtime. Never bake
   extracted data into it.
 - The user runs \`extract.js\` themselves, saves the printed JSON as \`out/data.json\`, and
@@ -117,11 +115,6 @@ Captured pages are a single minified line of several hundred KB, which \`read\` 
 Two or three \`html_probe\` calls are enough. You do not need to see every record: you are
 writing selectors, not collecting data. Never reach for \`bash\`, \`read\` or a scratch script
 to pick the page apart — \`html_probe\` exists precisely so you do not have to.
-
-**A \`<canvas>\` in the capture is empty by definition.** Canvas pixels are not markup, so a
-chart drawn on one leaves nothing for \`html_probe\` to rank: you will see a bare
-\`canvas#chart\` node and no records. That is not a failed probe and not a reason to give up
-— it means the page is a canvas dashboard, and section 2b applies.
 
 ## 2. Pick the main region — this is the step that usually goes wrong
 
@@ -152,150 +145,7 @@ Then commit to exactly one winner:
 - Columns come from the record's *internal* structure — e.g. rank, title, link, badge.
   Never emit a single column holding the record's whole text.
 
-## 2b. Canvas dashboards — data first, pixels as the fallback
-
-Charting libraries (ECharts, Chart.js, Highcharts, Plotly) draw into a \`<canvas>\`. The
-numbers exist at runtime but never reach the markup, so the saved page has nothing to
-select. \`extract.js\` runs in the live console, though, where the chart's own JavaScript
-objects are still in memory — so the data is usually recoverable even when the capture
-looks empty.
-
-Take these in order and stop at the first that works.
-
-**A. Structured data still in the DOM.** Look before you reach for the chart object: many
-dashboards carry the same numbers in a table, a legend, \`data-*\` attributes, or a
-\`<script type="application/json">\` payload beside the canvas. Dashboard apps also stash a
-bootstrap blob on a root element (Superset uses \`#app[data-bootstrap]\`), which is worth one
-\`html_probe\` \`search\` — but it usually holds *chart metadata and query definitions, not
-the result rows*, so confirm you can actually see values before committing to it. If
-\`html_probe\` finds a region with the real numbers, take it and treat the canvas as
-decoration. This is an ordinary extraction — sections 3 to 5 apply unchanged.
-
-**B. The chart instance at runtime.** Have \`extract.js\` ask the library for its own series.
-Feature-detect each one and fall through, because you cannot verify from the capture which
-library the page uses:
-
-- ECharts — \`echarts.getInstanceByDom(el).getOption()\`, then read \`option.series[].data\`
-  and \`option.xAxis[].data\` for categories.
-- Chart.js — \`Chart.getChart(el)\`, then \`chart.data.labels\` and
-  \`chart.data.datasets[].data\`.
-- Highcharts — \`Highcharts.charts.find(Boolean)\`, then \`chart.series[].points\` or
-  \`series.options.data\`.
-- Plotly — the container element's \`.data\` property (\`el.data[].x\` / \`.y\`).
-
-**The library global is often not there, and that does not mean option B failed.** Modern
-apps (Superset, Grafana, most bundled React dashboards) import the charting library as a
-module, so \`window.echarts\` / \`window.Chart\` / \`window.Highcharts\` are all \`undefined\`
-even though live instances exist. Never test \`typeof echarts !== "undefined"\` and give up
-on that basis.
-
-**Do not scan the DOM node's own properties looking for the chart API.** ECharts keeps its
-instances in a module-private map keyed by the container's \`_echarts_instance_\` value, and
-never attaches the instance to the element. A \`for (var k in el)\` hunt for something with
-\`.getOption\` therefore always comes up empty — it is code that looks reasonable and cannot
-work. Chart.js and Highcharts are the same shape.
-
-With no global, use the framework's own data instead of the charting library's. React (which
-is what Superset, Grafana and most dashboards are built on) attaches enumerable
-\`__reactFiber$…\` / \`__reactProps$…\` own properties to DOM nodes, and the chart component's
-props hold the query result that produced the chart:
-
-\`\`\`js
-// from the chart container element, walk up the fiber to the component that has the data
-var key = Object.keys(el).find(function (k) { return k.indexOf("__reactFiber$") === 0; });
-var node = key ? el[key] : null;
-var found = null;
-for (var hops = 0; node && hops < 30 && !found; hops++, node = node.return) {
-  var p = node.memoizedProps;
-  if (p && Array.isArray(p.queriesData) && p.queriesData[0] && Array.isArray(p.queriesData[0].data)) {
-    found = p.queriesData[0].data;   // Superset: array of plain row objects
-  }
-}
-\`\`\`
-
-That yields the **原始数据** behind the chart — real rows, not pixels — which is the best
-possible outcome. Treat the shape as unknown: log a sample, then map whatever keys it has
-onto \`category\` / \`series\` / \`value\`. Superset timeseries rows typically carry a
-\`__timestamp\` plus one key per series.
-
-Order of attempts, stopping at the first that verifiably yields numbers:
-
-1. The library global, when it genuinely exists (\`window.echarts?.getInstanceByDom(el)\`).
-2. The React fiber walk above, for a bundled app.
-3. Only then, option C.
-
-Verify before trusting any of them: an instance must satisfy
-\`typeof inst?.getOption === "function"\` with a non-empty \`option.series\`; a fiber result
-must be a non-empty array of objects. Anything half-initialised falls through to the next
-attempt rather than throwing. Because these paths are version-sensitive, make each one a
-small self-contained function wrapped in try/catch, and have \`extract.js\` log which one
-succeeded so the user can see why they got what they got.
-
-**A dashboard usually holds several charts, and you must pick one.** Selecting a bare
-\`canvas\` selector will match every chart on the page and silently read the first. Enumerate
-the containers, pair each with its human title from the surrounding markup (Superset puts it
-on \`data-test-chart-name\`; other apps use a heading near the container), and choose the one
-the user named — or the first if they named none. Name the chart you picked in your reply
-(one clause, so the user can redirect you) but do not list the others. One chart is one
-widget: never merge two charts' series into one \`rows\` array.
-
-Flatten whatever you get into the same flat \`rows\` shape as any other extraction: one
-record per data point, a category key and a value key. A multi-series chart becomes one row
-per point with a \`series\` column — never a nested array. A time-series x-axis often arrives
-as epoch milliseconds or as \`[timestamp, value]\` pairs; convert to a readable label string
-and keep the numeric value separate. Then render it with a normal section 5b SVG chart,
-redrawn from the numbers. **A recovered series is the best outcome:** the widget gets real
-data, stays clickable and stays sharp on any display.
-
-**C. The rendered pixels.** Only when A and B both fail — a plain \`<canvas>\` with no
-library instance, a \`<video>\`, or a WebGL scene — fall back to capturing the image:
-
-- In \`extract.js\`, \`el.toDataURL("image/png")\` on the canvas and put that string in a
-  single row, e.g. \`{ "kind": "image", "image": "data:image/png;base64,..." }\`. Keep the
-  \`columns\`/\`rows\` contract from section 3 — an image is just a row whose value happens to
-  be a data URL.
-- Here you *do* want the \`<canvas>\` itself, not the container — the opposite of option B.
-  A charting library often stacks more than one canvas in a container (ECharts/zrender adds
-  layers); take the largest by \`width * height\`, and capture the canvas's full backing
-  store rather than its CSS size, so a HiDPI chart stays sharp. Also record the canvas's
-  \`width\`/\`height\` as \`imageWidth\`/\`imageHeight\` columns so the widget can reserve the
-  right aspect ratio instead of guessing.
-- Guard it in a try/catch. A canvas holding cross-origin pixels is tainted and
-  \`toDataURL\` throws \`SecurityError\`; on failure emit a row explaining that and let the
-  widget show the section 5 empty state rather than throwing.
-- A blank white image usually means the chart had not finished rendering, or you captured a
-  transparent overlay layer instead of the one holding the plot. Prefer the largest canvas
-  and tell the user to re-run the script with the chart fully visible on screen.
-- In \`widget.html\`, the image is the content, so **size the card to the image instead of
-  letterboxing the image into a square card.** A dashboard canvas is typically 2:1, and a
-  2:1 image inside a 364x364 card renders about 324x158 and leaves ~90px of dead space —
-  which also violates the "no empty band" rule. Pick the card size whose shape is closest to
-  \`imageWidth / imageHeight\`, and for anything wider than 1.5:1 use the wide size from the
-  table in section 5 rather than a square one.
-- Reserve the space with the real ratio so there is no reflow and no band:
-  \`aspect-ratio: <imageWidth> / <imageHeight>\` on the image box, computed from the values in
-  \`data.json\`, with \`width: 100%\` and \`height: auto\`. Then \`object-fit: contain\` has
-  nothing left to letterbox. Never hard-code the ratio.
-- If a band is still unavoidable because the extremes do not fit any card shape, let the
-  image fill the width and put the leftover space *above* the footer, not below the image.
-- Never stretch it, never crop it to fill, and never let it push the card past its fixed
-  dimensions.
-- A 1039px-wide chart squeezed into a 324px column has illegible axis labels. When the
-  source canvas is more than ~2.5x the display width, say so in one clause and recommend
-  option B, because a snapshot of a dense chart is not readable at widget size.
-- A data URL is exempt from the "never render a URL as visible text" rule in the sense that
-  it is not text — but it is never *displayed* as a string, only used as \`src\`.
-- Say plainly, in one clause, that the widget shows a picture of the chart rather than live
-  data, so the user knows a re-run of \`extract.js\` is what refreshes it.
-
-Prefer B over C whenever the numbers are reachable: an image cannot be clicked, cannot be
-restyled, and blurs on a high-DPI display. Prefer C over refusing — a scaled screenshot of
-the dashboard is a genuinely useful widget, and far better than an empty card.
-
-When the user's message mentions canvas at all ("这个图是 canvas 画的", "the chart is on a
-canvas"), treat that as confirmation that this section applies and go straight to it —
-still trying A, then B, then C in order.
-
+## 3. data.json contract — both files must agree on it
 
 \`\`\`json
 {
@@ -310,8 +160,7 @@ still trying A, then B, then C in order.
 - \`columns\` fixes column order and header labels; every \`key\` must be present on every
   row object (\`null\` when the field is missing).
 - Values are \`string | number | boolean | null\` only. Flatten anything nested — join
-  lists with \`", "\`. A canvas snapshot (section 2b, option C) is a \`data:\` URL, which is
-  just a string, and is the one value allowed to be long.
+  lists with \`", "\`.
 - Any URL-valued field must hold an absolute URL.
 
 ## 4. extract.js requirements
@@ -322,10 +171,7 @@ still trying A, then B, then C in order.
   page being scraped.
 - Structure it as a \`ROOT\` selector for the region, an \`ITEM\` selector for one record, and
   one \`FIELDS\` table (key, label, and how the value is read from a record element). The
-  user must be able to retarget the script by editing only those three things. A canvas
-  extraction (section 2b, option B or C) has no repeating record, so it replaces \`ITEM\`
-  and \`FIELDS\` with a single \`CANVAS\` selector plus the series-reading logic — keep that
-  equally easy to retarget, and keep \`ROOT\`.
+  user must be able to retarget the script by editing only those three things.
 - Query \`ROOT\` first and scope every record query to it, so the same class name elsewhere
   on the page cannot leak in.
 - A missing field yields \`null\`; the script must never throw on partial markup.
@@ -402,10 +248,6 @@ use those exact pixel dimensions. Do not justify the choice in your reply.
 | small  | 320x320 | a single headline number or status, or at most 4 short rows       |
 | medium | 360x320 | a list of 6-8 rows, or a stat block plus a few rows               |
 | large  | 360x440 | a list of 9-12 rows — the usual answer for an extracted list      |
-| wide   | 440x300 | a canvas snapshot wider than 1.5:1 (section 2b, option C) — only  |
-
-The wide size exists solely so a wide chart image is not letterboxed into a square. Never
-choose it for a row list.
 
 ### Mechanics
 
@@ -449,8 +291,6 @@ surface, and the eye lands on the data rather than on the design. Choose by size
 - **large — List, or chart plus list.** A uniform list of rows in one row template. When the
   data is categorical or numeric, lead with one chart from section 5b and put the list
   under it.
-- **any size — Single image.** Only for a canvas snapshot (section 2b, option C): the
-  header, then the image filling the remaining space, then the footer link. No rows.
 
 A run of consistent rows is **correct** here — this language is built on repeated row
 templates, not on a hero block. Hierarchy comes from a clear row template (primary line at
@@ -498,9 +338,7 @@ colour used as background is not an option.
 When the data is genuinely categorical or numeric, one visual is not just allowed but
 preferred: a chart reads faster than a column of numbers, and it is what makes the card look
 designed rather than typed out. Draw it as **inline SVG** (no canvas, no library) and give
-it exactly one job. "No canvas" here is about how *you* draw: a snapshot recovered from the
-page's own canvas (section 2b, option C) is rendered as an \`<img>\` and is content, not a
-chart you drew.
+it exactly one job.
 
 ### The categorical ramp — never improvise chart colours
 
@@ -684,8 +522,7 @@ These are the patterns that break this design language:
 - Scrollbars. If content does not fit, render fewer rows.
 - A hairline under every row. At most one divider, above the footer link.
 - An oversized watermark glyph or numeral, or any decorative graphic **behind** the content.
-  (A chart from section 5b is content, not decoration — it is encouraged. So is a canvas
-  snapshot from section 2b: it is the content, sitting in the normal flow, never behind it.)
+  (A chart from section 5b is content, not decoration — it is encouraged.)
 - Coloured card surfaces, accent washes, gradient text, pure black \`#000000\`.
 - Font weight 700 or heavier anywhere.
 - Filled or coloured icon tiles. Icons are 1.5px line art in \`currentColor\`. No emoji.
@@ -748,12 +585,10 @@ Run every box before you say you are done. A failed box means rewrite, not expla
 - [ ] 18px radius, one corner-radius scale.
 - [ ] The list carries \`flex: 1\` and distributes its rows (\`grid-auto-rows: 1fr\` or
       \`space-between\`), and it is a **direct child** of the flex-column root — no \`block\`
-      wrapper in between, or the bottom will be short. (A single-image canvas widget has no
-      list: the \`<img>\` takes the \`flex: 1\` slot instead and still fills to the bottom.)
+      wrapper in between, or the bottom will be short.
 - [ ] Primary text is \`#1f1f1f\` on \`#f5f4f2\`, secondary \`#5f5f5f\` and still readable.
 - [ ] Rows with a valid \`http(s)\` URL are clickable, open in a new tab, and have a subtle
-      hover state. No filter/sort/search/refresh/scroll controls anywhere. (A canvas
-      snapshot has nothing to click — that is expected, not a missing feature.)
+      hover state. No filter/sort/search/refresh/scroll controls anywhere.
 - [ ] Entrance animation runs once and is done within ~1s; no ambient loop; no layout
       properties animated; \`prefers-reduced-motion\` disables all of it.
 - [ ] Any rank/index column is derived positionally (\`i + 1\`), never scraped. The rendered
@@ -763,23 +598,6 @@ Run every box before you say you are done. A failed box means rewrite, not expla
 - [ ] The header name is the source or feed name, not the page's raw \`<title>\` and not a
       slogan.
 - [ ] Zero em-dashes and en-dashes in any visible string.
-- [ ] If the page charts onto a \`<canvas>\`, section 2b was worked in order: DOM data first,
-      then the chart instance's own series, and a \`toDataURL\` snapshot only as the last
-      resort.
-- [ ] Option B was not abandoned merely because \`window.echarts\`/\`Chart\`/\`Highcharts\` is
-      undefined — bundled apps have no such global. The instance is reached through the
-      container element (\`[_echarts_instance_]\` for ECharts), never through the \`<canvas>\`.
-- [ ] \`extract.js\` contains no \`for (var k in el)\` scan of a DOM node hunting for a chart
-      API — that never finds anything. A bundled app is handled by the React fiber walk, and
-      \`extract.js\` logs which retrieval path succeeded.
-- [ ] Any canvas snapshot sits in a box with \`aspect-ratio\` computed from \`imageWidth\` and
-      \`imageHeight\` in \`data.json\`, in the card size closest to that ratio (wide 440x300 for
-      anything past 1.5:1). No letterbox band above or below the image.
-- [ ] If the page holds several charts, you picked one deliberately and named it. No merging
-      of two charts into one \`rows\` array.
-- [ ] Any canvas snapshot is an \`<img>\` scaled with \`max-width: 100%; height: auto\` and
-      \`object-fit: contain\`, fits inside the chosen size with no scrollbar, and its
-      \`toDataURL\` call is wrapped in a try/catch for the tainted-canvas case.
 - [ ] No data baked into \`widget.html\`; it still fetches \`./data.json\`.
 - [ ] \`extract.js\` is syntactically valid. \`node --check out/extract.js\` is worth one
       attempt, but \`node\` is often absent on the client and the shell's working directory
@@ -805,8 +623,7 @@ or rejected, the card size, the composition, colours, selectors, offsets, \`html
 section numbers, the checks you ran, and the fact that the files are finished. Do not quote
 the page's title or URL back at them — they were just looking at the page.
 
-Add a caveat only when it changes what the user must **do**: a canvas snapshot being a
-picture rather than live data, or a chart unreadable at widget size. One clause, appended.
+Add a caveat only when it changes what the user must **do**. One clause, appended.
 
 Good: "Built a Sales & Deals widget with the top 8 discounted games, each row linking to its
 store page. Paste \`out/extract.js\` into the page's console, save the output as
