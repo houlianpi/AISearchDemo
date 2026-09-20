@@ -4,7 +4,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Env } from "../env.ts";
 
 /**
- * Both upstreams are OpenAI-compatible (`/v1/chat/completions`, SSE, `tool_calls`
+ * All upstreams are OpenAI-compatible (`/v1/chat/completions`, SSE, `tool_calls`
  * deltas), so pi's `openai-completions` API implementation drives them directly.
  *
  * Exactly one provider is live per deployment, selected by `LLM_PROVIDER`.
@@ -16,6 +16,7 @@ import type { Env } from "../env.ts";
 
 export const GATEWAY_PROVIDER_ID = "gateway";
 export const DEEPSEEK_PROVIDER_ID = "deepseek";
+export const COPILOT_PROVIDER_ID = "copilot";
 
 /** The `LLM_PROVIDER` value used when the variable is unset. */
 const DEFAULT_PROVIDER_ID = GATEWAY_PROVIDER_ID;
@@ -28,6 +29,7 @@ interface CatalogEntry {
 	maxTokens: number;
 	/** Defaults to text-only; set explicitly for vision-capable models. */
 	vision?: boolean;
+	defaultThinkingLevel?: ThinkingLevel;
 }
 
 interface ProviderDefinition {
@@ -45,6 +47,8 @@ interface ProviderDefinition {
 	 * default of "medium". Restored sessions keep whatever they were using.
 	 */
 	defaultThinkingLevel?: ThinkingLevel;
+	/** Defaults to the existing user-message fallback for legacy upstreams. */
+	userMessageBrief?: boolean;
 }
 
 /** Mirrors the Anthropic/OpenAI gateway's `/v1/models`. */
@@ -57,8 +61,23 @@ const GATEWAY_CATALOG: CatalogEntry[] = [
 	{ id: "gpt-5.5", name: "GPT-5.5", reasoning: true, contextWindow: 200_000, maxTokens: 32_000, vision: true },
 ];
 
+const COPILOT_CATALOG: CatalogEntry[] = [
+	...GATEWAY_CATALOG.filter((entry) => entry.id === "gpt-5.6-sol")
+		.map((entry): CatalogEntry => ({ ...entry, defaultThinkingLevel: "medium" })),
+	{
+		id: "gemini-3.8-flash",
+		name: "Gemini 3.8 Flash",
+		reasoning: true,
+		// The gateway's prompt limit is below its 1,048,576-token total window.
+		contextWindow: 983_040,
+		maxTokens: 65_536,
+		vision: true,
+	},
+];
+
 /**
- * Mirrors the DeepSeek gateway's `/v1/models`. Only `-vision-exp` accepts images.
+ * Legacy Flash IDs now route to the image-capable `deepseek-flash` upstream.
+ * Pro remains text-only; preserve old IDs so restored sessions still resolve.
  *
  * Both limits are measured against the live gateway, not guessed:
  *  - contextWindow: 1_032_229 prompt tokens accepted; 1_214_367 rejected with
@@ -70,7 +89,7 @@ const GATEWAY_CATALOG: CatalogEntry[] = [
  */
 const DEEPSEEK_CATALOG: CatalogEntry[] = [
 	{ id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", reasoning: true, contextWindow: 1_048_576, maxTokens: 65_536 },
-	{ id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", reasoning: true, contextWindow: 1_048_576, maxTokens: 65_536 },
+	{ id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", reasoning: true, contextWindow: 1_048_576, maxTokens: 65_536, vision: true },
 	{
 		id: "deepseek-v4-flash-vision-exp",
 		name: "DeepSeek V4 Flash Vision (exp)",
@@ -112,7 +131,7 @@ const PROVIDERS: ProviderDefinition[] = [
 			thinkingFormat: "deepseek",
 			maxTokensField: "max_tokens",
 		},
-		// Reasoning on, at the lowest useful setting.
+		// Reasoning enabled. "medium" maps to DeepSeek V4's native "high".
 		//
 		// It is worth being explicit about why this is not "off", because turning
 		// it off looked like a huge win: a 488 KB page build went 274s -> 116s.
@@ -123,12 +142,20 @@ const PROVIDERS: ProviderDefinition[] = [
 		// that number (25458 -> 24413 -> 25376 chars), because a prompt cannot
 		// control which field a model writes to.
 		//
-		// "low" keeps reasoning in `reasoning_content` where it belongs while
-		// avoiding the runaway seen at pi's default of "medium" (one roundtrip
-		// spent 151s emitting 67_994 chars of reasoning to produce a single tool
-		// call, growing non-linearly with context). Message length is handled
-		// where it belongs — by the budget in the brief, not by muting the model.
-		defaultThinkingLevel: "low",
+		// This deliberately raises effort from "low". Higher effort can produce
+		// longer reasoning; it is not a fixed token or latency budget.
+		defaultThinkingLevel: "medium",
+	},
+	{
+		id: COPILOT_PROVIDER_ID,
+		name: "Copilot Model Gateway",
+		baseUrl: (env) => env.COPILOT_BASE_URL,
+		apiKey: (env) => env.COPILOT_API_KEY,
+		defaultModel: (env) => env.COPILOT_DEFAULT_MODEL,
+		apiKeyVar: "COPILOT_API_KEY",
+		catalog: COPILOT_CATALOG,
+		compat: { supportsDeveloperRole: false },
+		userMessageBrief: false,
 	},
 ];
 
@@ -167,8 +194,7 @@ export async function createModelRuntime(env: Env): Promise<ModelRuntime> {
 		allowModelNetwork: false,
 	});
 
-	// Only the selected provider is registered. Registering both would make a
-	// missing second key a hard startup failure even when it is never used.
+	// Only the selected provider is registered; unused providers need no keys.
 	runtime.registerProvider(provider.id, {
 		name: provider.name,
 		baseUrl,
@@ -232,7 +258,12 @@ export function listModelIds(env: Env): string[] {
  * Thinking level to use for a brand-new session, or undefined to let pi apply
  * its own default ("medium"). Gateway is unaffected.
  */
-export function defaultThinkingLevel(env: Env): ThinkingLevel | undefined {
-	return providerDefinition(env).defaultThinkingLevel;
+export function defaultThinkingLevel(env: Env, modelId?: string): ThinkingLevel | undefined {
+	const provider = providerDefinition(env);
+	const selected = modelId?.trim() || provider.defaultModel(env)?.trim() || provider.catalog[0]?.id;
+	return provider.catalog.find((entry) => entry.id === selected)?.defaultThinkingLevel ?? provider.defaultThinkingLevel;
 }
 
+export function requiresUserBrief(env: Env): boolean {
+	return providerDefinition(env).userMessageBrief !== false;
+}

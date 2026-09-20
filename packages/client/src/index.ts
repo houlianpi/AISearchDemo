@@ -1,15 +1,19 @@
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import {
+	clientMessageByteLimit,
 	type ClientMessage,
 	type HistoryMessage,
+	imageByteLength,
 	PROTOCOL_VERSION,
+	type PromptImageLimits,
 	type RemoteOpName,
 	type ServerMessage,
 	type SessionSummary,
 } from "@wa/protocol";
 import WebSocket from "ws";
 import { runOp } from "./local-ops.ts";
+import { prepareImagePrompt, prepareImagesPrompt } from "./image-prompt.ts";
 
 /**
  * Headless client: stdin/stdout instead of a TUI.
@@ -33,6 +37,7 @@ const pendingAcks = new Map<string, { resolve: (data: unknown) => void; reject: 
 const runningOps = new Map<string, AbortController>();
 let activeSessionId: string | undefined;
 let requestCounter = 0;
+let imageLimits: PromptImageLimits | undefined;
 
 const socket = new WebSocket(SERVER_URL, { headers: { "X-User-Id": USER_ID } });
 
@@ -63,6 +68,7 @@ socket.on("error", (error) => {
 async function handle(message: ServerMessage): Promise<void> {
 	switch (message.t) {
 		case "ready":
+			imageLimits = message.capabilities?.promptImages;
 			process.stdout.write(`connected as ${message.userId} (max ${message.maxConcurrentTurns} concurrent sessions)\n`);
 			await bootstrap(message.sessions);
 			return;
@@ -144,9 +150,16 @@ async function newSession(): Promise<void> {
 }
 
 const rl = createInterface({ input: process.stdin, terminal: false });
+let inputQueue = Promise.resolve();
 
 rl.on("line", (line) => {
-	void onLine(line.trim());
+	const text = line.trim();
+	// Interrupts must not wait behind a file read or a delayed acknowledgement.
+	if (text === "/abort" || text === "/quit" || text === "/exit") {
+		void onLine(text);
+		return;
+	}
+	inputQueue = inputQueue.then(() => onLine(text));
 });
 
 async function onLine(line: string): Promise<void> {
@@ -187,6 +200,14 @@ async function onLine(line: string): Promise<void> {
 			process.stderr.write("no active session\n");
 			return prompt();
 		}
+		const imageCommand = /^\/(image|images)(?:\s|$)/.exec(line);
+		if (imageCommand) {
+			if (!imageLimits) throw new Error("This server does not advertise image prompts. Update the server first.");
+			const prepare = imageCommand[1] === "images" ? prepareImagesPrompt : prepareImagePrompt;
+			const input = await prepare(line.slice(imageCommand[0].length), CWD, imageLimits);
+			await request({ t: "prompt", id: nextId(), sessionId: activeSessionId, text: input.text, images: input.images });
+			return;
+		}
 		await request({ t: "prompt", id: nextId(), sessionId: activeSessionId, text: line });
 	} catch (error) {
 		process.stderr.write(`[error] ${error instanceof Error ? error.message : String(error)}\n`);
@@ -212,6 +233,11 @@ function render(event: import("@wa/protocol").AgentStreamEvent): void {
 			process.stdout.write(`\n[tokens in=${event.usage?.input ?? 0} out=${event.usage?.output ?? 0}]\n`);
 			prompt();
 			return;
+		case "message_end":
+			if (event.role === "assistant" && event.errorMessage) {
+				process.stderr.write(`\n[model error] ${event.errorMessage}\n`);
+			}
+			return;
 		case "error":
 			process.stderr.write(`\n[agent error] ${event.message}\n`);
 			return;
@@ -229,6 +255,9 @@ function renderHistory(message: HistoryMessage): void {
 	switch (message.k) {
 		case "user":
 			process.stdout.write(`\n> ${message.text}\n`);
+			for (const [index, image] of (message.images ?? []).entries()) {
+				process.stdout.write(`  [image ${index + 1}: ${image.mimeType}, ${imageByteLength(image.data)} bytes]\n`);
+			}
 			return;
 		case "assistant":
 			process.stdout.write(`${message.text}\n`);
@@ -246,12 +275,25 @@ function renderHistory(message: HistoryMessage): void {
 function request(message: ClientMessage & { id: string }): Promise<unknown> {
 	return new Promise((resolve, reject) => {
 		pendingAcks.set(message.id, { resolve, reject });
-		send(message);
+		try {
+			send(message);
+		} catch (error) {
+			pendingAcks.delete(message.id);
+			reject(error instanceof Error ? error : new Error(String(error)));
+		}
 	});
 }
 
 function send(message: ClientMessage): void {
-	socket.send(JSON.stringify(message));
+	const json = JSON.stringify(message);
+	let limit = clientMessageByteLimit(message);
+	if (message.t === "prompt" && message.images?.length && imageLimits) {
+		limit = Math.min(limit, imageLimits.maxPromptBytes);
+	}
+	if (!Number.isFinite(limit) || Buffer.byteLength(json, "utf-8") > limit) {
+		throw new Error(`Message exceeds the ${limit}-byte limit. Reduce the text or image sizes.`);
+	}
+	socket.send(json);
 }
 
 function nextId(): string {
@@ -263,5 +305,5 @@ function prompt(): void {
 }
 
 function printHelp(): void {
-	process.stdout.write("commands: /new  /sessions  /attach <id>  /abort  /help  /quit\n");
+	process.stdout.write('commands: /new  /sessions  /attach <id>  /image "<path>" [question]  /images "<path1>" "<path2>" -- [question]  /abort  /help  /quit\n');
 }

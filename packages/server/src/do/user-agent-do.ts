@@ -1,15 +1,20 @@
 import { DurableObject } from "cloudflare:workers";
+import { Buffer } from "node:buffer";
 import {
+	clientMessageByteLimit,
 	type ClientMessage,
+	IMAGE_PROMPT_LIMITS,
 	isClientMessage,
+	parsePromptInput,
 	PROTOCOL_VERSION,
+	type PromptImage,
 	type ServerMessage,
 	type SessionSummary,
 } from "@wa/protocol";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createModelRuntime, listModelIds } from "../agent/model.ts";
 import { type Env, maxConcurrentTurns } from "../env.ts";
-import { toHistoryMessages } from "./history.ts";
+import { toHistoryFrames } from "./history.ts";
 import { OpRpc } from "./op-rpc.ts";
 import { Outbox } from "./outbox.ts";
 import { SessionRunner } from "./session-runner.ts";
@@ -22,7 +27,6 @@ interface SocketState {
 
 /** Heartbeat that keeps the DO resident while a turn awaits a remote tool. */
 const KEEPALIVE_INTERVAL_MS = 10_000;
-const MAX_INBOUND_MESSAGE_BYTES = 1_000_000;
 
 /**
  * One Durable Object per user. Owns that user's sessions, their SQLite entry
@@ -76,21 +80,20 @@ export class UserAgentDO extends DurableObject<Env> {
 			userId,
 			sessions: this.summaries(),
 			maxConcurrentTurns: maxConcurrentTurns(this.env),
+			capabilities: { promptImages: IMAGE_PROMPT_LIMITS },
 		});
 
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
 	override async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
-		if (typeof raw !== "string") return;
-		if (raw.length > MAX_INBOUND_MESSAGE_BYTES) {
-			// Fail the specific tool call if we can still identify it. Dropping the
-			// frame silently would leave that call pending until its timeout, so the
-			// turn would appear to hang long after the client already gave up.
-			const callId = callIdOf(raw);
-			const detail = `client frame of ${raw.length} bytes exceeds the ${MAX_INBOUND_MESSAGE_BYTES} byte limit`;
-			if (callId) this.rpc.reject(callId, detail);
-			else this.sendTo(ws, { t: "fatal", message: detail });
+		if (typeof raw !== "string") {
+			this.sendTo(ws, { t: "fatal", message: "Expected a JSON text frame; send images as Base64 in prompt.images." });
+			return;
+		}
+		const bytes = Buffer.byteLength(raw, "utf-8");
+		if (bytes > IMAGE_PROMPT_LIMITS.maxPromptBytes) {
+			this.rejectOversizedFrame(ws, raw, bytes, IMAGE_PROMPT_LIMITS.maxPromptBytes);
 			return;
 		}
 
@@ -105,12 +108,17 @@ export class UserAgentDO extends DurableObject<Env> {
 			this.sendTo(ws, { t: "fatal", message: "unrecognised message" });
 			return;
 		}
+		const limit = clientMessageByteLimit(message);
+		if (bytes > limit) {
+			this.rejectOversizedFrame(ws, raw, bytes, limit, message);
+			return;
+		}
 
 		try {
 			await this.dispatch(ws, message);
 		} catch (error) {
 			const text = error instanceof Error ? error.message : String(error);
-			const id = (message as { id?: string }).id;
+			const id = "id" in message && typeof message.id === "string" ? message.id : undefined;
 			if (id) this.sendTo(ws, { t: "ack", id, ok: false, error: text });
 			else this.sendTo(ws, { t: "fatal", message: text });
 		}
@@ -167,6 +175,8 @@ export class UserAgentDO extends DurableObject<Env> {
 			case "session.attach": {
 				const row = this.store.getSession(message.sessionId);
 				if (!row) throw new Error(`unknown session ${message.sessionId}`);
+				const entries = this.store.readEntries(message.sessionId, message.sinceSeq ?? 0);
+				const frames = toHistoryFrames(message.sessionId, entries, this.store.lastSeq(message.sessionId));
 				this.attach(ws, message.sessionId);
 				// Ack first so the client can announce the session before the transcript.
 				this.sendTo(ws, {
@@ -175,13 +185,7 @@ export class UserAgentDO extends DurableObject<Env> {
 					ok: true,
 					data: { session: toSummary(row, this.runners.get(message.sessionId)?.running ?? false) },
 				});
-				const entries = this.store.readEntries(message.sessionId, message.sinceSeq ?? 0);
-				this.sendTo(ws, {
-					t: "history",
-					sessionId: message.sessionId,
-					messages: toHistoryMessages(entries),
-					lastSeq: this.store.lastSeq(message.sessionId),
-				});
+				for (const frame of frames) this.sendTo(ws, frame);
 				return;
 			}
 
@@ -202,15 +206,20 @@ export class UserAgentDO extends DurableObject<Env> {
 			}
 
 			case "prompt": {
+				if (typeof message.id !== "string" || !message.id || typeof message.sessionId !== "string" || !message.sessionId) {
+					throw new Error("prompt requires string id and sessionId.");
+				}
+				const input = parsePromptInput(message);
 				const runner = await this.runnerFor(message.sessionId, ws);
 				if (!runner.running && this.activeTurns >= maxConcurrentTurns(this.env)) {
 					throw new Error(`concurrency limit reached (${maxConcurrentTurns(this.env)} sessions streaming)`);
 				}
+				runner.validatePrompt(input.text, input.streamingBehavior, input.images);
 				this.attach(ws, message.sessionId);
 				// Acknowledge acceptance, then run the turn detached so this handler
 				// returns and subsequent frames (tool results, abort) keep flowing.
 				this.sendTo(ws, { t: "ack", id: message.id, ok: true });
-				this.startTurn(runner, message.text, message.streamingBehavior);
+				this.startTurn(runner, input.text, input.streamingBehavior, input.images);
 				return;
 			}
 
@@ -232,16 +241,17 @@ export class UserAgentDO extends DurableObject<Env> {
 
 			default: {
 				const exhaustive: never = message;
-				throw new Error(`unhandled message ${JSON.stringify(exhaustive)}`);
+				void exhaustive;
+				throw new Error("unhandled message type");
 			}
 		}
 	}
 
-	private startTurn(runner: SessionRunner, text: string, streamingBehavior?: "steer" | "followUp"): void {
+	private startTurn(runner: SessionRunner, text: string, streamingBehavior?: "steer" | "followUp", images: PromptImage[] = []): void {
 		this.activeTurns += 1;
 		this.armKeepalive();
 		void runner
-			.prompt(text, streamingBehavior)
+			.prompt(text, streamingBehavior, images)
 			.catch((error: unknown) => {
 				this.outbox.pushAndFlush(runner.sessionId, {
 					k: "error",
@@ -254,6 +264,16 @@ export class UserAgentDO extends DurableObject<Env> {
 				this.notifySessionUpdated(runner.sessionId);
 				if (this.activeTurns === 0) this.clearKeepalive();
 			});
+	}
+
+	private rejectOversizedFrame(ws: WebSocket, raw: string, bytes: number, limit: number, message?: ClientMessage): void {
+		const detail = `client frame of ${bytes} bytes exceeds the ${limit} byte limit`;
+		const callId = message && "callId" in message && typeof message.callId === "string" ? message.callId : callIdOf(raw);
+		const id = message && "id" in message && typeof message.id === "string"
+			? message.id : /"id"\s*:\s*"([^"\\]{1,200})"/.exec(raw.slice(0, 4096))?.[1];
+		if (callId) this.rpc.reject(callId, detail);
+		else if (id) this.sendTo(ws, { t: "ack", id, ok: false, error: detail });
+		else this.sendTo(ws, { t: "fatal", message: detail });
 	}
 
 	private async runnerFor(sessionId: string, ws: WebSocket): Promise<SessionRunner> {

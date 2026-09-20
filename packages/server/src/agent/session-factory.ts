@@ -23,9 +23,9 @@ import {
 import type { OpRpc } from "../do/op-rpc.ts";
 import type { Env } from "../env.ts";
 import { createHtmlProbeToolDefinition } from "./html-probe.ts";
-import { defaultThinkingLevel, resolveModel, resolveRestoredModel } from "./model.ts";
+import { defaultThinkingLevel, requiresUserBrief, resolveModel, resolveRestoredModel } from "./model.ts";
 import { createRemoteOperations } from "./remote-ops.ts";
-import { PAGE_EXTRACTION_BRIEF } from "./task-prompt.ts";
+import { PAGE_EXTRACTION_BRIEF, stripEmbeddedBrief } from "./task-prompt.ts";
 
 /**
  * Workers has no writable persistent filesystem (`/tmp` is per-request and
@@ -109,7 +109,7 @@ export async function createRemoteSession(options: CreateRemoteSessionOptions): 
 		: resolveRestoredModel(modelRuntime, env, restored?.model);
 	// A restored session keeps whatever level it was created with; only a new
 	// session picks up the provider's default.
-	const thinkingLevel = restored ? toThinkingLevel(restored.thinkingLevel) : defaultThinkingLevel(env);
+	const thinkingLevel = restored ? toThinkingLevel(restored.thinkingLevel) : defaultThinkingLevel(env, model.id);
 
 	const { session } = await createAgentSession({
 		cwd,
@@ -126,6 +126,12 @@ export async function createRemoteSession(options: CreateRemoteSessionOptions): 
 
 	if (restored) {
 		session.agent.state.messages = restored.messages;
+	}
+
+	if (!requiresUserBrief(env)) {
+		const convertToLlm = session.agent.convertToLlm;
+		session.agent.convertToLlm = async (messages) =>
+			(await convertToLlm(messages)).map(stripEmbeddedBrief);
 	}
 
 	return { session, sessionManager };

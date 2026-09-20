@@ -11,16 +11,22 @@ export interface Env {
 	LLM_PROVIDER?: string;
 
 	/** OpenAI-compatible gateway base URL, including the `/v1` suffix. */
-	LLM_BASE_URL: string;
+	LLM_BASE_URL?: string;
 	/** Secret. Set via `wrangler secret put LLM_API_KEY` or `.dev.vars`. */
-	LLM_API_KEY: string;
-	DEFAULT_MODEL: string;
+	LLM_API_KEY?: string;
+	DEFAULT_MODEL?: string;
 
 	/** DeepSeek gateway base URL, including the `/v1` suffix. */
 	DEEPSEEK_BASE_URL?: string;
 	/** Secret. Set via `wrangler secret put DEEPSEEK_API_KEY` or `.dev.vars`. */
 	DEEPSEEK_API_KEY?: string;
 	DEEPSEEK_DEFAULT_MODEL?: string;
+
+	/** Custom multi-model gateway base URL, including the `/v1` suffix. */
+	COPILOT_BASE_URL?: string;
+	/** Secret. Set via `wrangler secret put COPILOT_API_KEY` or `.dev.vars`. */
+	COPILOT_API_KEY?: string;
+	COPILOT_DEFAULT_MODEL?: string;
 
 	/** Max sessions allowed to stream concurrently inside one user's Durable Object. */
 	MAX_CONCURRENT_TURNS?: string;

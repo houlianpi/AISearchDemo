@@ -10,7 +10,7 @@ import type { SessionSummary, StoredEntry } from "@wa/protocol";
  */
 
 /** DO SQLite caps a row at 2 MB. pi truncates tool output well below this. */
-const MAX_ENTRY_BYTES = 1_500_000;
+export const MAX_ENTRY_BYTES = 1_500_000;
 
 export interface SessionRow {
 	sessionId: string;

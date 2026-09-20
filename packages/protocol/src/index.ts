@@ -10,6 +10,9 @@
  *   intact and only their IO layer is remoted.
  */
 
+import type { PromptImage, PromptImageLimits } from "./images.ts";
+export * from "./images.ts";
+
 export const PROTOCOL_VERSION = 1;
 
 /**
@@ -39,8 +42,8 @@ export interface RemoteOpMap {
 	};
 	"fs.readFile": {
 		/**
-		 * `offset`/`length` are byte ranges into the file. A Cloudflare WebSocket
-		 * frame is capped at 1 MiB and base64 inflates by 4/3, so a captured page
+		 * `offset`/`length` are byte ranges into the file. Ordinary RPC frames
+		 * have an application limit of 1,000,000 bytes and base64 inflates by 4/3, so a captured page
 		 * of a few hundred KB cannot come back in one response. The server reads
 		 * large files as a sequence of chunks and concatenates them.
 		 */
@@ -138,7 +141,7 @@ export interface StoredEntry {
  * out, so a resuming client never sees the server's system prompt.
  */
 export type HistoryMessage =
-	| { k: "user"; text: string }
+	| { k: "user"; text: string; images?: PromptImage[] }
 	| { k: "assistant"; text: string }
 	| { k: "tool_call"; toolCallId: string; name: string; args: unknown }
 	| { k: "tool_result"; toolCallId: string; name: string; isError: boolean; output: string };
@@ -154,7 +157,7 @@ export type ClientMessage =
 	| { t: "session.attach"; id: string; sessionId: string; sinceSeq?: number }
 	| { t: "session.detach"; id: string; sessionId: string }
 	| { t: "session.delete"; id: string; sessionId: string }
-	| { t: "prompt"; id: string; sessionId: string; text: string; streamingBehavior?: "steer" | "followUp" }
+	| { t: "prompt"; id: string; sessionId: string; text?: string; images?: PromptImage[]; streamingBehavior?: "steer" | "followUp" }
 	| { t: "abort"; id: string; sessionId: string }
 	| { t: "op.result"; callId: string; ok: true; result: unknown }
 	| { t: "op.result"; callId: string; ok: false; error: string }
@@ -166,10 +169,14 @@ export type ClientMessage =
 // ---------------------------------------------------------------------------
 
 export type ServerMessage =
-	| { t: "ready"; protocolVersion: number; userId: string; sessions: SessionSummary[]; maxConcurrentTurns: number }
+	| {
+		t: "ready"; protocolVersion: number; userId: string; sessions: SessionSummary[]; maxConcurrentTurns: number;
+		/** Optional so new clients can detect older text-only servers. */
+		capabilities?: { promptImages?: PromptImageLimits };
+	}
 	| { t: "ack"; id: string; ok: true; data?: unknown }
 	| { t: "ack"; id: string; ok: false; error: string }
-	| { t: "history"; sessionId: string; messages: HistoryMessage[]; lastSeq: number }
+	| { t: "history"; sessionId: string; messages: HistoryMessage[]; lastSeq: number; hasMore?: boolean }
 	| { t: "stream"; sessionId: string; events: AgentStreamEvent[] }
 	| { t: "session.updated"; session: SessionSummary }
 	| { t: "op.call"; callId: string; sessionId: string; op: RemoteOpName; args: RemoteOpArgs; timeoutMs: number }

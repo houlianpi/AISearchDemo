@@ -13,7 +13,7 @@ import { DEFAULT_BASH_TIMEOUT_MS, type OpRpc } from "../do/op-rpc.ts";
  * Bytes requested per `fs.readFile` round trip.
  *
  * Base64 inflates this by 4/3 (~683 KB) and the JSON envelope adds a little
- * more, which leaves comfortable headroom under Cloudflare's 1 MiB frame cap.
+ * more, which leaves headroom under the application's ordinary RPC frame limit.
  */
 const READ_CHUNK_BYTES = 512 * 1024;
 
@@ -44,7 +44,7 @@ export function createRemoteOperations(rpc: OpRpc, sessionId: string) {
 	/**
 	 * Reads a file that may be larger than one WebSocket frame.
 	 *
-	 * Cloudflare caps an inbound frame at 1 MiB and base64 inflates by 4/3, so a
+	 * Ordinary RPC frames are limited to 1,000,000 bytes and base64 inflates by 4/3, so a
 	 * whole-file response is only safe for small files. The first call learns the
 	 * real size; anything bigger is pulled as successive byte ranges.
 	 */
