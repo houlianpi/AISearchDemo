@@ -18,10 +18,15 @@ import { enrichTopSearchResults } from "./result-metadata.ts";
 import { createSubmitResponseTool, type SubmittedResponse } from "./result-tool.ts";
 import { demoFallbackResults, searchResultsFromEntries } from "./search-results.ts";
 import { SessionCache } from "./session-cache.ts";
+import { createNormalizedWebSearchTool } from "./web-search-tool.ts";
 
-const SYSTEM_PROMPT = `You are the backend agent for an image AI search demo.
+export const AGENT_THINKING_LEVEL = "low" as const;
+export const SYSTEM_PROMPT = `You are the backend agent for an image AI search demo.
 For a message with an image: understand the image first, call web_search with useful identifying keywords, then synthesize the answer from the image and search evidence.
 For a text-only follow-up: use conversation context and call web_search only when current web evidence would improve the answer.
+For each user message, make one primary web_search call. Pass exactly one concise query using the query field, set workflow to "none", set includeContent to false, and request no more than 5 results. Never use the queries field.
+Only when the primary search returns an error or zero results, make one retry with a shorter query containing the identified brand and product/model name. Use the same workflow, includeContent, and result limit. Never make more than two web_search calls total.
+Keep links and source lists out of the answer. Search result links are rendered separately by the application. If both searches fail, give a concise image-only answer without inventing, guessing, or listing URLs.
 Search failures are non-fatal; provide the best answer you can. Never invent search results.
 Always finish by calling submit_response exactly once. Do not return the final answer as plain assistant text.`;
 const require = createRequire(import.meta.url);
@@ -67,7 +72,16 @@ export class AgentService {
 
 		const entryStart = live.sessionManager.getEntries().length;
 		live.lastSubmission = undefined;
-		await live.session.prompt(request.prompt.trim(), image ? { images: [image] } : undefined);
+		const unsubscribe = live.session.subscribe((event) => {
+			if (event.type === "tool_execution_end" && event.toolName === "web_search" && event.isError) {
+				console.warn("web_search failed:", toolErrorMessage(event.result));
+			}
+		});
+		try {
+			await live.session.prompt(request.prompt.trim(), image ? { images: [image] } : undefined);
+		} finally {
+			unsubscribe();
+		}
 		const submitted = live.lastSubmission ?? answerFromMessages(live.session.messages, image);
 		const submission: SubmittedResponse = {
 			answer: submitted.answer,
@@ -115,6 +129,10 @@ export class AgentService {
 		if (loaded.errors.length > 0 || !loaded.extensions.some((extension) => extension.tools.has("web_search"))) {
 			throw new HttpError(500, "SEARCH_PLUGIN_LOAD_FAILED", loaded.errors.map((error) => error.error).join("; ") || "pi-web-access did not register web_search.");
 		}
+		const webSearchDefinition = loaded.extensions
+			.flatMap((extension) => [...extension.tools.values()])
+			.find((tool) => tool.definition.name === "web_search")?.definition;
+		if (!webSearchDefinition) throw new HttpError(500, "SEARCH_PLUGIN_LOAD_FAILED", "pi-web-access did not expose web_search.");
 
 		const sessionManager = SessionManager.inMemory(process.cwd(), { id: sessionId });
 		const live: LiveSession = {
@@ -124,8 +142,8 @@ export class AgentService {
 		};
 		const submitTool = createSubmitResponseTool((response) => { live.lastSubmission = response; });
 		const { session } = await createAgentSession({
-			cwd: process.cwd(), agentDir, modelRuntime: runtime, model, thinkingLevel: "medium",
-			settingsManager, resourceLoader, sessionManager, customTools: [submitTool],
+			cwd: process.cwd(), agentDir, modelRuntime: runtime, model, thinkingLevel: AGENT_THINKING_LEVEL,
+			settingsManager, resourceLoader, sessionManager, customTools: [createNormalizedWebSearchTool(webSearchDefinition), submitTool],
 			tools: ["web_search", "submit_response"],
 		});
 		live.session = session;
@@ -151,4 +169,17 @@ function searchWasCalled(entries: readonly import("@earendil-works/pi-coding-age
 	return entries.slice(fromIndex).some((entry) =>
 		entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "web_search",
 	);
+}
+
+function toolErrorMessage(result: unknown): string {
+	if (!result || typeof result !== "object") return String(result);
+	const content = (result as { content?: unknown }).content;
+	if (!Array.isArray(content)) return "Unknown web search error";
+	return content
+		.filter((part): part is { type: "text"; text: string } =>
+			!!part && typeof part === "object" && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string",
+		)
+		.map((part) => part.text)
+		.join(" ")
+		.slice(0, 1_000) || "Unknown web search error";
 }

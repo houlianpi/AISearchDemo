@@ -77,6 +77,9 @@ main {
 .query-row { display: flex; justify-content: flex-end; margin-bottom: 24px; }
 .query-bubble {
   max-width: 90%;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   padding: 10px 13px;
   border-radius: 15px 15px 4px 15px;
   background: #edf6fc;
@@ -84,6 +87,15 @@ main {
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
+.query-image {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  object-fit: cover;
+  background: #fff;
+}
+.query-text { min-width: 0; align-self: center; }
 .answer { color: #111; font-size: 15px; line-height: 1.62; overflow-wrap: anywhere; }
 .answer-paragraph { margin: 0 0 18px; }
 .answer > .answer-paragraph:first-child { font-weight: 600; }
@@ -233,8 +245,8 @@ main {
 .composer textarea::placeholder { color: #6f6f6f; }
 .composer-actions { min-height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; }
 .image-picker, .submit-button { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
-.image-picker { min-height: 40px; gap: 7px; padding: 0 14px; border: 1px solid #dedede; border-radius: 20px; color: #626262; background: #fff; font-size: 13px; font-weight: 500; }
-.image-picker .plus { font-size: 21px; font-weight: 300; line-height: 1; transform: translateY(-1px); }
+.image-picker { width: 42px; height: 42px; padding: 0; border: 1px solid #dedede; border-radius: 50%; color: #626262; background: #fff; }
+.image-picker .plus { font-size: 25px; font-weight: 300; line-height: 1; transform: translateY(-1px); }
 .submit-button { width: 42px; height: 42px; padding: 0; border: 0; border-radius: 50%; color: #fff; background: #aaa; box-shadow: 0 2px 7px rgba(0,0,0,.12); }
 .submit-button:hover:not(:disabled) { background: #909090; }
 .submit-button svg { width: 19px; height: 19px; }

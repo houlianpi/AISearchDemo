@@ -4,6 +4,7 @@ import { buildMessageRequest, createSessionId, RequestLifecycle, validateImageFi
   "use strict";
   var sessionId = createSessionId();
   var selectedImage = null;
+  var displayedQueryImageUrl = null;
   var lastRequest = null;
   var requests = new RequestLifecycle();
 
@@ -56,7 +57,8 @@ import { buildMessageRequest, createSessionId, RequestLifecycle, validateImageFi
     var requestSessionId = sessionId;
     setBusy(true);
     clearError();
-    showPendingQuestion(text);
+    showPendingQuestion(text, file);
+    if (file) clearImage();
     try {
       var image = file ? await fileToImage(file) : null;
       if (!requests.isCurrent(activeRequest)) return;
@@ -68,7 +70,7 @@ import { buildMessageRequest, createSessionId, RequestLifecycle, validateImageFi
       var payload = await response.json().catch(function () { return {}; });
       if (!requests.isCurrent(activeRequest)) return;
       if (!response.ok) throw new Error(payload.error && payload.error.message || "The search request failed.");
-      renderResponse(text, payload);
+      renderResponse(payload);
       prompt.value = "";
       prompt.placeholder = "Ask a follow up";
       clearImage();
@@ -77,9 +79,8 @@ import { buildMessageRequest, createSessionId, RequestLifecycle, validateImageFi
     }
   }
 
-  function renderResponse(question, payload) {
+  function renderResponse(payload) {
     conversation.hidden = false;
-    queryBubble.textContent = question;
     renderAnswer(answer, payload.answer || "No answer was returned.");
     sources.replaceChildren();
     var results = Array.isArray(payload.searchResults) ? payload.searchResults.slice(0, 3) : [];
@@ -87,15 +88,31 @@ import { buildMessageRequest, createSessionId, RequestLifecycle, validateImageFi
     sourcesSection.hidden = results.length === 0;
   }
 
-  function showPendingQuestion(question) {
+  function showPendingQuestion(question, file) {
     appShell.classList.add("has-session");
     emptyState.hidden = true;
     conversation.hidden = false;
-    queryBubble.textContent = question;
+    renderQueryBubble(question, file);
     answer.replaceChildren();
     sources.replaceChildren();
     sourcesSection.hidden = true;
     prompt.value = "";
+  }
+
+  function renderQueryBubble(question, file) {
+    if (displayedQueryImageUrl) URL.revokeObjectURL(displayedQueryImageUrl);
+    displayedQueryImageUrl = null;
+    queryBubble.replaceChildren();
+    if (file) {
+      displayedQueryImageUrl = URL.createObjectURL(file);
+      var image = element("img", "query-image");
+      image.src = displayedQueryImageUrl;
+      image.alt = "Attached image";
+      queryBubble.appendChild(image);
+    }
+    var text = element("span", "query-text");
+    text.textContent = question;
+    queryBubble.appendChild(text);
   }
 
   function createSourceCard(result) {
@@ -184,6 +201,8 @@ import { buildMessageRequest, createSessionId, RequestLifecycle, validateImageFi
     emptyState.hidden = false;
     conversation.hidden = true;
     queryBubble.textContent = "";
+    if (displayedQueryImageUrl) URL.revokeObjectURL(displayedQueryImageUrl);
+    displayedQueryImageUrl = null;
     answer.replaceChildren();
     sources.replaceChildren();
     sourcesSection.hidden = true;
