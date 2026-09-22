@@ -18,8 +18,14 @@ export interface SearchResult {
 	title: string;
 	url: string;
 	snippet: string;
-	thumbnailUrl?: string;
 	source: string;
+	sourceName?: string;
+	faviconUrl?: string;
+	thumbnailUrl?: string;
+	publishedAt?: string;
+	author?: string;
+	contentType?: "article" | "video" | "page";
+	duration?: string;
 }
 
 export interface MessageResponse {

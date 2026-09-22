@@ -14,6 +14,7 @@ import { localConfig, type LocalConfig } from "../env.ts";
 import { HttpError, type MessageRequest, type MessageResponse } from "./contracts.ts";
 import { resolveImage } from "./images.ts";
 import { createLocalModelRuntime, resolveLocalModel } from "./model.ts";
+import { enrichTopSearchResults } from "./result-metadata.ts";
 import { createSubmitResponseTool, type SubmittedResponse } from "./result-tool.ts";
 import { demoFallbackResults, searchResultsFromEntries } from "./search-results.ts";
 import { SessionCache } from "./session-cache.ts";
@@ -81,6 +82,7 @@ export class AgentService {
 			searchResults = demoFallbackResults();
 			searchMode = "demo-fallback";
 		}
+		searchResults = await enrichTopSearchResults(searchResults, { fetcher: this.fetcher });
 		return { sessionId, ...submission, searchResults, searchMode };
 	}
 

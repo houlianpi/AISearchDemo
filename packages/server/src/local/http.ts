@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AgentService } from "./agent-service.ts";
 import { HttpError, MAX_REQUEST_BYTES, type MessageRequest } from "./contracts.ts";
+import { staticAsset } from "./static-site.ts";
 
 const ROUTE = /^\/v1\/sessions\/([^/]+)\/messages$/;
 
@@ -8,6 +9,16 @@ export function createHttpHandler(service: Pick<AgentService, "message">) {
 	return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
 		try {
 			const path = new URL(request.url ?? "/", "http://localhost").pathname;
+			if (request.method === "GET") {
+				const asset = await staticAsset(path);
+				if (!asset) throw new HttpError(404, "NOT_FOUND", "Not found.");
+				response.writeHead(200, {
+					"content-type": asset.contentType, "content-length": asset.body.length,
+					"cache-control": "no-store",
+				});
+				response.end(asset.body);
+				return;
+			}
 			const match = ROUTE.exec(path);
 			if (request.method !== "POST" || !match?.[1]) throw new HttpError(404, "NOT_FOUND", "Not found.");
 			if (!(request.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {

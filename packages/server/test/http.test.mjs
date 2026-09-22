@@ -30,7 +30,26 @@ test("POST message returns the service JSON", async () => {
 	assert.deepEqual(received, { sessionId: "demo-1", body: { prompt: "hello" } });
 });
 
-test("rejects every route and method except the one API", async () => {
+test("serves the Sidepane page and its static assets", async () => {
+	await withServer({ message: async () => assert.fail() }, async (base) => {
+		const page = await fetch(`${base}/`);
+		assert.equal(page.status, 200);
+		assert.match(page.headers.get("content-type"), /^text\/html/);
+		const html = await page.text();
+		assert.match(html, /Copilot Search/);
+		assert.match(html, /Start a new session/);
+		assert.doesNotMatch(html, /class="topbar"/);
+		assert.match(html, /How can I help you today\?/);
+		assert.doesNotMatch(html, /Search with an image|Add a photo and ask a question/);
+		assert.doesNotMatch(html, /New search|AI responses may be inaccurate/i);
+		for (const path of ["/assets/app.css", "/assets/app.js", "/assets/client-logic.js"]) {
+			const asset = await fetch(`${base}${path}`);
+			assert.equal(asset.status, 200);
+		}
+	});
+});
+
+test("rejects unknown routes and non-POST API methods", async () => {
 	await withServer({ message: async () => assert.fail() }, async (base) => {
 		assert.equal((await fetch(`${base}/health`)).status, 404);
 		assert.equal((await fetch(`${base}/v1/sessions/demo/messages`)).status, 404);
