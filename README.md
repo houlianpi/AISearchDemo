@@ -25,6 +25,28 @@ npm start
 
 默认监听 `http://127.0.0.1:8787`。首次出现的 `sessionId` 会自动创建内存会话；每次访问都会刷新十分钟有效期。服务重启后上下文丢失。
 
+## Tavily 搜索配置
+
+推荐固定使用 Tavily，避免无 Key 搜索源的限流和长时间等待。Key 只保存在本机，不要提交到 Git。
+
+在项目根目录的 `.env` 中加入：
+
+```dotenv
+TAVILY_API_KEY=tvly-your-key
+```
+
+创建或修改 `~/.pi/agent/web-search.json`：
+
+```json
+{
+  "provider": "tavily",
+  "tavilyApiKey": "$TAVILY_API_KEY",
+  "workflow": "none"
+}
+```
+
+配置修改后必须重启 `npm start`。验证请求成功时，API 响应中的 `searchMode` 应为 `live`，且 `searchResults` 不为空。
+
 ## Edge Sidepane 页面
 
 启动服务后打开：
