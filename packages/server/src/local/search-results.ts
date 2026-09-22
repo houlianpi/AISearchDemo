@@ -3,6 +3,9 @@ import type { SearchResult } from "./contracts.ts";
 
 interface PluginSearchResult { title?: unknown; url?: unknown; snippet?: unknown; thumbnailUrl?: unknown }
 
+const MAX_RESULTS = 10;
+const MAX_RESULTS_PER_SOURCE = 2;
+
 export function searchResultsFromEntries(entries: readonly SessionEntry[], fromIndex: number): SearchResult[] {
 	const results: SearchResult[] = [];
 	const seen = new Set<string>();
@@ -30,7 +33,33 @@ export function searchResultsFromEntries(entries: readonly SessionEntry[], fromI
 			}
 		}
 	}
-	return results;
+	return interleaveBySource(results);
+}
+
+/**
+ * Keeps each site's original relevance order while round-robin interleaving
+ * sites, so one marketplace cannot dominate the response.
+ */
+export function interleaveBySource(results: readonly SearchResult[]): SearchResult[] {
+	const groups = new Map<string, SearchResult[]>();
+	for (const result of results) {
+		const group = groups.get(result.source);
+		if (group) {
+			if (group.length < MAX_RESULTS_PER_SOURCE) group.push(result);
+		} else {
+			groups.set(result.source, [result]);
+		}
+	}
+
+	const ordered: SearchResult[] = [];
+	for (let rank = 0; rank < MAX_RESULTS_PER_SOURCE && ordered.length < MAX_RESULTS; rank++) {
+		for (const group of groups.values()) {
+			const result = group[rank];
+			if (result) ordered.push(result);
+			if (ordered.length === MAX_RESULTS) break;
+		}
+	}
+	return ordered;
 }
 
 export function demoFallbackResults(): SearchResult[] {
