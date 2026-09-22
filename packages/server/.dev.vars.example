@@ -1,7 +1,0 @@
-# Copy to `.dev.vars` (gitignored) for local `wrangler dev`.
-# Only the key for the provider selected by `LLM_PROVIDER` (in wrangler.jsonc)
-# is actually required; the others can be left as-is.
-# For deploys: `npx wrangler secret put <LLM_API_KEY|DEEPSEEK_API_KEY|COPILOT_API_KEY>`
-LLM_API_KEY = "sk-replace-me"
-DEEPSEEK_API_KEY = "sk-replace-me"
-COPILOT_API_KEY = "sk-replace-me"

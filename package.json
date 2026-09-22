@@ -5,10 +5,9 @@
 	"workspaces": ["packages/*"],
 	"scripts": {
 		"dev": "npm -w @wa/server run dev",
-		"deploy": "npm -w @wa/server run deploy",
-		"bundle:check": "npm -w @wa/server run bundle:check",
-		"client": "npm -w @wa/client run start",
-		"typecheck": "npm -w @wa/server run typecheck && npm -w @wa/client run typecheck"
+		"start": "npm -w @wa/server run start",
+		"test": "npm -w @wa/server test",
+		"typecheck": "npm -w @wa/server run typecheck"
 	},
 	"devDependencies": {
 		"typescript": "5.9.3"

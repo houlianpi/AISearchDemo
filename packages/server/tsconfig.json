@@ -1,10 +1,7 @@
 {
 	"extends": "../../tsconfig.base.json",
 	"compilerOptions": {
-		"types": ["@cloudflare/workers-types"],
-		"paths": {
-			"@wa/protocol": ["../protocol/src/index.ts"]
-		}
+		"types": ["node"]
 	},
-	"include": ["src/**/*.ts", "../protocol/src/**/*.ts"]
+	"include": ["src/index.ts", "src/env.ts", "src/typebox-setup.ts", "src/local/**/*.ts"]
 }
